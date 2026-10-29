@@ -38,6 +38,15 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     win.open_project(path)
     _wait(app, win)
     assert win.db is not None and win.db.get_meta("linked") == "1"
+    from codescope.gui.metrics_view import ProjectSummary
+    overview = win.tabs.currentWidget()
+    assert isinstance(overview, ProjectSummary)
+    assert overview.sunburst.root["value"] > 0
+    assert [l for l, _, _ in overview.lines.items][:2] == ["Code", "Comment"]
+    assert overview.bubbles.items[0][0] == "classify"
+    overview.sunburst.grab()
+    overview.bubbles.grab()
+    assert overview.sunburst.segments and len(overview.bubbles.circles) == len(overview.bubbles.items)
     main = next(e for e in win.db.entities(name="main") if e.kind == "Function")
     win.activate_entity(main.id)
     pane = win.tabs.currentWidget()

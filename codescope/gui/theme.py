@@ -263,6 +263,7 @@ QFrame#Card {{ background: {t['card']}; border: 1px solid {t['border']}; border-
 QLabel#CardValue {{ color: {t['fg']}; font-size: 20px; font-weight: 600; }}
 QLabel#CardLabel {{ color: {t['muted']}; }}
 QLabel#Hero {{ color: {t['fg']}; font-size: 26px; font-weight: 600; }}
+QLabel#ChartTitle {{ color: {t['fg']}; font-size: 14px; font-weight: 600; }}
 QLabel#Section {{ color: {t['muted']}; font-weight: 600; letter-spacing: 1px; }}
 QWidget#Page {{ background: {t['bg']}; }}
 QPushButton#Tile {{ text-align: left; padding: 14px 16px; border-radius: 8px; background: {t['card']}; font-size: 13px; }}

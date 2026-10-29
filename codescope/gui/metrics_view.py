@@ -8,7 +8,7 @@ import posixpath
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QPushButton, QTableView, QTableWidget, QTableWidgetItem, QToolTip,
+                               QLineEdit, QPushButton, QScrollArea, QTableView, QTableWidget, QTableWidgetItem, QToolTip,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import model as M
@@ -152,19 +152,25 @@ class MetricsBrowser(QWidget):
                 fh.write(metrics_csv(self.db, kinds, names))
 
 
-class ProjectSummary(QWidget):
+class ProjectSummary(QScrollArea):
     """Dashboard shown after opening a project."""
     entityActivated = Signal(int)
+    entitySelected = Signal(int)
 
     CARDS = [("Files", "Files"), ("CountLine", "Lines"), ("CountLineCode", "Code lines"),
              ("CountLineComment", "Comment lines"), ("Classes", "Classes"), ("Functions", "Functions"),
              ("MaxCyclomatic", "Max complexity"), ("AvgCyclomatic", "Avg complexity")]
 
     def __init__(self, db, checks=None, parent=None):
-        super().__init__(parent, objectName="Page")
+        super().__init__(parent)
+        from . import charts
         self.db = db
         self.title = "Project Overview"
-        outer = QVBoxLayout(self)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QScrollArea.NoFrame)
+        page = QWidget(objectName="Page")
+        self.setWidget(page)
+        outer = QVBoxLayout(page)
         outer.setContentsMargins(32, 26, 32, 26)
         outer.setSpacing(14)
         self.name = QLabel(objectName="Hero")
@@ -177,6 +183,7 @@ class ProjectSummary(QWidget):
         self.values = {}
         for i, (key, label) in enumerate(self.CARDS):
             card = QFrame(objectName="Card")
+            card.setStyleSheet(f"QFrame#Card {{ border-left: 4px solid {charts.PALETTE[i % len(charts.PALETTE)]}; }}")
             cl = QVBoxLayout(card)
             cl.setContentsMargins(16, 12, 16, 12)
             cl.setSpacing(2)
@@ -186,6 +193,32 @@ class ProjectSummary(QWidget):
             self.values[key] = v
             grid.addWidget(card, i // 4, i % 4)
         outer.addLayout(grid)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        self.sunburst = charts.SunburstChart()
+        self.lines = charts.HalfDonutChart()
+        self.bubbles = charts.BubbleChart()
+        for chart, title, sub in ((self.sunburst, "Directory Structure", "Segment size by lines of code"),
+                                  (self.lines, "Line Breakdown", "Categorization by line type"),
+                                  (self.bubbles, "Most Complex Functions",
+                                   "Complexity by the McCabe cyclomatic metric")):
+            frame = QFrame(objectName="Card")
+            fl = QVBoxLayout(frame)
+            fl.setContentsMargins(12, 12, 12, 12)
+            fl.setSpacing(2)
+            t = QLabel(title, objectName="ChartTitle")
+            t.setAlignment(Qt.AlignCenter)
+            st = QLabel(sub, objectName="Muted")
+            st.setAlignment(Qt.AlignCenter)
+            fl.addWidget(t)
+            fl.addWidget(st)
+            fl.addWidget(chart, 1)
+            frame.setMinimumHeight(330)
+            row.addWidget(frame, 1)
+        self.sunburst.fileActivated.connect(self.entityActivated)
+        self.bubbles.entityActivated.connect(self.entityActivated)
+        self.bubbles.entitySelected.connect(self.entitySelected)
+        outer.addLayout(row)
         tables = QHBoxLayout()
         tables.setSpacing(16)
         self.complex = self._table(["Most complex functions", "Cyclomatic", "Code lines"])
@@ -194,6 +227,8 @@ class ProjectSummary(QWidget):
         tables.addWidget(self.complex, 4)
         tables.addWidget(self.files, 3)
         tables.addWidget(self.langs, 2)
+        for t in (self.complex, self.files, self.langs):
+            t.setMinimumHeight(260)
         outer.addLayout(tables, 1)
         self.refresh()
 
@@ -246,6 +281,15 @@ class ProjectSummary(QWidget):
             m = fvals.get(e.id, {})
             self._row(self.files, [e.longname, fmt_value(m.get("CountLineCode")), fmt_value(m.get("CountDeclFunction"))],
                       e.id, M.FILE)
+        from . import charts
+        self.sunburst.set_files([(e.longname, int(fvals.get(e.id, {}).get("CountLineCode", 0)), e.id)
+                                 for e in files])
+        pre = pm.get("CountLinePreprocessor", 0)
+        self.lines.set_items([("Code", max(0, pm["CountLineCode"] - pre), charts.LINE_COLORS["Code"]),
+                              ("Comment", pm["CountLineComment"], charts.LINE_COLORS["Comment"]),
+                              ("Preprocessor", pre, charts.LINE_COLORS["Preprocessor"]),
+                              ("Blank", pm["CountLineBlank"], charts.LINE_COLORS["Blank"])])
+        self.bubbles.set_items([(e.longname, vals[e.id].get("Cyclomatic", 0), e.id) for e in top[:12]])
         for lang, n in sorted(pm["Languages"].items()):
             loc = db.conn.execute("SELECT COALESCE(SUM(m.value),0) FROM metrics m JOIN entities e ON e.id=m.entity_id "
                                   "JOIN files f ON f.id=e.file_id WHERE e.kind='File' AND m.name='CountLineCode' "

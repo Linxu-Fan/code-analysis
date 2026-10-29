@@ -350,6 +350,16 @@ class BaseExtractor:
                     m.pop("_start", None)
                     if not m:
                         del self.metrics[e.lid]
+        if self.lang in ("c", "cpp"):
+            # preprocessor directive lines (including continuation lines)
+            pre = 0
+            cont = False
+            for i, raw in enumerate(lines):
+                st = raw.strip()
+                if (cont or st.startswith(b"#")) and i not in self.comment_rows:
+                    pre += 1
+                cont = (cont or st.startswith(b"#")) and st.endswith(b"\\")
+            file_m["CountLinePreprocessor"] = pre
         file_m["CountDeclFunction"] = nfunc
         file_m["CountDeclClass"] = nclass
         file_m["SumCyclomatic"] = sum(cyclos)

@@ -24,6 +24,7 @@ click away (moon icon, or **View → Dark Theme**).
 | **Metrics** | Lines (code, comment, blank), comment ratio, McCabe cyclomatic complexity, max nesting, statements, parameters, fan-in/fan-out, Halstead volume/difficulty/effort, maintainability index, and for classes WMC, DIT, NOC, CBO and LCOM. Shown in a sortable metrics browser, a treemap, and exported as CSV. |
 | **Dependency analysis** | Dependency structure matrix (DSM) at directory or file level, with dependency cycles highlighted. |
 | **CodeCheck** | 30 configurable rules: complexity and size thresholds, OO design, dead code (uncalled functions, unused globals, parameters and locals), naming conventions, risky constructs (`goto`, empty handlers, bare `except`, assignment in conditions, missing `default`, mutable default arguments, …), style and documentation. |
+| **Dashboard** | The Project Overview shows key totals plus Understand-style charts: a directory-structure sunburst sized by lines of code, a line breakdown (code, comment, preprocessor and blank lines) and a bubble chart of the most complex functions. |
 | **Reports** | A self-contained HTML report: summary, data dictionary, cross-reference, metrics, CodeCheck results, graphs and browsable highlighted source. |
 | **Command line** | `codescope` automates everything above for CI pipelines; `check --fail-on warning` returns a failing exit code. |
 

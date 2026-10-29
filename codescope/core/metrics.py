@@ -11,6 +11,7 @@ METRIC_DESCRIPTIONS = {
     "CountLineCode": "Lines containing code",
     "CountLineComment": "Lines containing comments",
     "CountLineBlank": "Blank lines",
+    "CountLinePreprocessor": "Preprocessor directive lines (C/C++)",
     "RatioCommentToCode": "Comment lines / code lines",
     "Cyclomatic": "McCabe cyclomatic complexity",
     "MaxNesting": "Maximum nesting depth of control structures",

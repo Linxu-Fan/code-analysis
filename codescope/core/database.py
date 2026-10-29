@@ -419,7 +419,8 @@ class Database:
         out = {}
         q = self.conn.execute
         out["Files"] = q("SELECT COUNT(*) FROM files").fetchone()[0]
-        for name in ("CountLine", "CountLineCode", "CountLineComment", "CountLineBlank", "SumCyclomatic"):
+        for name in ("CountLine", "CountLineCode", "CountLineComment", "CountLineBlank", "CountLinePreprocessor",
+                     "SumCyclomatic"):
             out[name] = int(q("SELECT COALESCE(SUM(m.value),0) FROM metrics m JOIN entities e ON e.id=m.entity_id "
                               "WHERE e.kind=? AND m.name=?", (M.FILE, name)).fetchone()[0])
         def count(kinds):
