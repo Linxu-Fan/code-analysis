@@ -93,7 +93,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Run build.bat
         shell: cmd
         run: build.bat -NoPause
@@ -106,3 +106,4 @@ jobs:
             if (-not (Test-Path $f)) { throw "missing $f" }
             Write-Host "ok $f"
           }
+          if (Test-Path "build\codescope\CodeScope.exe") { throw "intermediate exe left in build\" }

@@ -27,6 +27,9 @@ Set-Location $Root
 $Venv = Join-Path $Root ".build-venv"
 $VenvPython = Join-Path $Venv "Scripts\python.exe"
 $Dist = Join-Path $Root "dist"
+# PyInstaller's intermediate files (including non-runnable .exe stubs) go to a hidden folder
+# that is removed after a successful build, so only dist\ contains executables.
+$Work = Join-Path $Root ".build-work"
 $Started = Get-Date
 
 function Write-Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -92,7 +95,7 @@ Write-Host "Repository: $Root"
 
 if ($Clean) {
     Write-Step "Cleaning previous build"
-    foreach ($p in @($Venv, (Join-Path $Root "build"), $Dist)) {
+    foreach ($p in @($Venv, $Work, (Join-Path $Root "build"), $Dist)) {
         if (Test-Path $p) { Remove-Item -Recurse -Force $p; Write-Ok "removed $p" }
     }
 }
@@ -148,18 +151,26 @@ if (-not $SkipTests) {
 # ---- executables -------------------------------------------------------------------------------
 Write-Step "Building executables with PyInstaller (takes a minute or two)"
 $AppDir = Join-Path $Dist "CodeScope"
+$OldWork = Join-Path $Root "build\codescope"
+if (Test-Path $OldWork) {
+    # left over by earlier builds; its CodeScope.exe cannot run and only causes confusion
+    Remove-Item -Recurse -Force $OldWork -ErrorAction SilentlyContinue
+    $OldBuild = Join-Path $Root "build"
+    if ((Test-Path $OldBuild) -and -not (Get-ChildItem $OldBuild -Force)) { Remove-Item -Force $OldBuild }
+}
 if (Test-Path $AppDir) {
     try { Remove-Item -Recurse -Force $AppDir }
     catch { Fail "Cannot replace $AppDir. Close any running CodeScope.exe and try again." }
 }
 Invoke-Checked "PyInstaller build" {
-    & $VenvPython -m PyInstaller --noconfirm --clean --log-level WARN packaging\codescope.spec
+    & $VenvPython -m PyInstaller --noconfirm --clean --log-level WARN --distpath $Dist --workpath $Work packaging\codescope.spec
 }
 $Cli = Join-Path $AppDir "codescope-cli.exe"
 if (-not (Test-Path (Join-Path $AppDir "CodeScope.exe")) -or -not (Test-Path $Cli)) {
     Fail "PyInstaller finished but the executables are missing in $AppDir"
 }
 Invoke-Checked "Smoke test of codescope-cli.exe" { & $Cli --version }
+Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 Write-Ok "built $AppDir"
 
 Write-Step "Creating the portable zip"
@@ -210,7 +221,7 @@ if (-not $SkipInstaller) {
 $elapsed = [int]((Get-Date) - $Started).TotalSeconds
 Write-Host ""
 Write-Host "BUILD SUCCEEDED in $elapsed s" -ForegroundColor Green
-Write-Host "  Application : $AppDir\CodeScope.exe"
+Write-Host "  Application : $AppDir\CodeScope.exe   <-- run this one"
 Write-Host "  Command line: $Cli"
 Write-Host "  Portable zip: $Zip"
 if ($Setup) { Write-Host "  Installer   : $Setup" }
