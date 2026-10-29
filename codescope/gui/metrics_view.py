@@ -7,9 +7,9 @@ import posixpath
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QPushButton, QTableView, QTableWidget, QTableWidgetItem, QTextBrowser,
-                               QToolTip, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QPushButton, QTableView, QTableWidget, QTableWidgetItem, QToolTip,
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core import model as M
 from ..core.graphs import directory_dependencies, file_dependencies
@@ -18,6 +18,21 @@ from ..core.metrics import METRIC_DESCRIPTIONS
 from ..core.report import CLASS_METRICS, FILE_METRICS, FUNC_METRICS, metrics_csv
 from . import theme
 from .common import fmt_value, kind_icon
+
+def _bar(layout):
+    """Wrap a toolbar row layout in a styled panel strip."""
+    w = QWidget(objectName="PanelBar")
+    layout.setContentsMargins(10, 6, 10, 6)
+    w.setLayout(layout)
+    return w
+
+
+def _page(widget):
+    v = QVBoxLayout(widget)
+    v.setContentsMargins(0, 0, 0, 0)
+    v.setSpacing(0)
+    return v
+
 
 GROUPS = [
     ("Functions", sorted(M.FUNCTION_KINDS), FUNC_METRICS + ["CountLine", "CountLineComment", "CountReturn",
@@ -103,8 +118,9 @@ class MetricsBrowser(QWidget):
         top.addWidget(self.group)
         top.addWidget(self.filter, 1)
         top.addWidget(export)
-        v = QVBoxLayout(self)
-        v.addLayout(top)
+        self.view.setFrameShape(QTableView.NoFrame)
+        v = _page(self)
+        v.addWidget(_bar(top))
         v.addWidget(self.view)
         self.group.currentIndexChanged.connect(self.reload)
         self.filter.textChanged.connect(self.proxy.setFilterFixedString)
@@ -136,51 +152,105 @@ class MetricsBrowser(QWidget):
                 fh.write(metrics_csv(self.db, kinds, names))
 
 
-class ProjectSummary(QTextBrowser):
-    """Overview page shown after opening a project."""
+class ProjectSummary(QWidget):
+    """Dashboard shown after opening a project."""
     entityActivated = Signal(int)
 
+    CARDS = [("Files", "Files"), ("CountLine", "Lines"), ("CountLineCode", "Code lines"),
+             ("CountLineComment", "Comment lines"), ("Classes", "Classes"), ("Functions", "Functions"),
+             ("MaxCyclomatic", "Max complexity"), ("AvgCyclomatic", "Avg complexity")]
+
     def __init__(self, db, checks=None, parent=None):
-        super().__init__(parent)
+        super().__init__(parent, objectName="Page")
         self.db = db
         self.title = "Project Overview"
-        self.setOpenLinks(False)
-        self.anchorClicked.connect(lambda url: self.entityActivated.emit(int(url.toString()[2:]))
-                                   if url.toString().startswith("e:") else None)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(32, 26, 32, 26)
+        outer.setSpacing(14)
+        self.name = QLabel(objectName="Hero")
+        self.sub = QLabel(objectName="Muted")
+        self.sub.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        outer.addWidget(self.name)
+        outer.addWidget(self.sub)
+        grid = QGridLayout()
+        grid.setSpacing(12)
+        self.values = {}
+        for i, (key, label) in enumerate(self.CARDS):
+            card = QFrame(objectName="Card")
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(16, 12, 16, 12)
+            cl.setSpacing(2)
+            v = QLabel("-", objectName="CardValue")
+            cl.addWidget(v)
+            cl.addWidget(QLabel(label, objectName="CardLabel"))
+            self.values[key] = v
+            grid.addWidget(card, i // 4, i % 4)
+        outer.addLayout(grid)
+        tables = QHBoxLayout()
+        tables.setSpacing(16)
+        self.complex = self._table(["Most complex functions", "Cyclomatic", "Code lines"])
+        self.files = self._table(["Largest files", "Code lines", "Functions"])
+        self.langs = self._table(["Language", "Files", "Code lines"])
+        tables.addWidget(self.complex, 4)
+        tables.addWidget(self.files, 3)
+        tables.addWidget(self.langs, 2)
+        outer.addLayout(tables, 1)
         self.refresh()
+
+    def _table(self, headers):
+        t = QTreeWidget()
+        t.setHeaderLabels(headers)
+        t.setRootIsDecorated(False)
+        t.setUniformRowHeights(True)
+        t.setAlternatingRowColors(True)
+        t.setObjectName("Card")
+        t.setTextElideMode(Qt.ElideMiddle)
+        t.header().setStretchLastSection(False)
+        t.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in range(1, len(headers)):
+            t.header().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        t.itemDoubleClicked.connect(lambda it, col: it.data(0, Qt.UserRole) and
+                                    self.entityActivated.emit(it.data(0, Qt.UserRole)))
+        return t
+
+    def _row(self, table, cols, eid=None, kind=None):
+        it = QTreeWidgetItem([str(c) for c in cols])
+        for c in range(1, len(cols)):
+            it.setTextAlignment(c, Qt.AlignRight | Qt.AlignVCenter)
+        if eid:
+            it.setData(0, Qt.UserRole, eid)
+            it.setToolTip(0, cols[0])
+        if kind:
+            it.setIcon(0, kind_icon(kind))
+        table.addTopLevelItem(it)
 
     def refresh(self):
         db = self.db
         pm = db.project_metrics()
         cfg = db.config()
-        dark = theme.current["name"] == "dark"
-        card_bg = "#2b2d30" if dark else "#f4f6f8"
-        fg = "#dfe1e5" if dark else "#1f2328"
-        muted = "#9aa0a6" if dark else "#656d76"
-        cards = [("Files", pm["Files"]), ("Lines", pm["CountLine"]), ("Code", pm["CountLineCode"]),
-                 ("Comments", pm["CountLineComment"]), ("Classes", pm["Classes"]),
-                 ("Functions", pm["Functions"]), ("Max complexity", pm["MaxCyclomatic"]),
-                 ("Avg complexity", pm["AvgCyclomatic"])]
-        cells = "".join(f"<td style='background:{card_bg};padding:10px 16px'><div style='font-size:20px;"
-                        f"font-weight:600'>{fmt_value(v)}</div><div style='color:{muted}'>{k}</div></td>"
-                        for k, v in cards)
-        langs = ", ".join(f"{display_name(l)} ({n})" for l, n in sorted(pm["Languages"].items()))
+        self.name.setText(cfg.get("name", "Project"))
+        self.sub.setText(f"{db.path}   \u00b7   analyzed {db.get_meta('analyzed_at', 'never')}")
+        for key, lbl in self.values.items():
+            v = pm.get(key, 0)
+            lbl.setText(f"{v:,}" if isinstance(v, int) else fmt_value(v))
+        for t in (self.complex, self.files, self.langs):
+            t.clear()
         funcs, vals = db.metric_table(sorted(M.FUNCTION_KINDS))
-        top = sorted(funcs, key=lambda e: -vals.get(e.id, {}).get("Cyclomatic", 0))[:10]
-        rows = "".join(f"<tr><td><a href='e:{e.id}'>{e.longname}</a></td><td align=right>"
-                       f"{fmt_value(vals[e.id].get('Cyclomatic'))}</td><td align=right>"
-                       f"{fmt_value(vals[e.id].get('CountLineCode'))}</td></tr>" for e in top if e.id in vals)
-        big = sorted(db.metric_table([M.FILE])[0], key=lambda e: -(db.metric(e.id, "CountLineCode", 0) or 0))[:10]
-        frows = "".join(f"<tr><td><a href='e:{e.id}'>{e.longname}</a></td><td align=right>"
-                        f"{fmt_value(db.metric(e.id, 'CountLineCode'))}</td></tr>" for e in big)
-        self.setHtml(f"""<div style='color:{fg};font-family:Segoe UI,sans-serif;margin:12px'>
-            <h2 style='margin-bottom:2px'>{cfg.get('name')}</h2>
-            <div style='color:{muted}'>{db.path}<br>Analyzed {db.get_meta('analyzed_at', 'never')} &middot; {langs}</div>
-            <table cellspacing=8 style='margin-top:10px'><tr>{cells}</tr></table>
-            <h3>Most complex functions</h3><table cellpadding=3 width=100%>
-            <tr><th align=left>Function</th><th align=right>Cyclomatic</th><th align=right>Code lines</th></tr>{rows}</table>
-            <h3>Largest files</h3><table cellpadding=3 width=100%>
-            <tr><th align=left>File</th><th align=right>Code lines</th></tr>{frows}</table></div>""")
+        top = sorted((e for e in funcs if e.id in vals), key=lambda e: -vals[e.id].get("Cyclomatic", 0))[:25]
+        for e in top:
+            self._row(self.complex, [e.longname, fmt_value(vals[e.id].get("Cyclomatic")),
+                                     fmt_value(vals[e.id].get("CountLineCode"))], e.id, e.kind)
+        files, fvals = db.metric_table([M.FILE])
+        big = sorted(files, key=lambda e: -fvals.get(e.id, {}).get("CountLineCode", 0))[:25]
+        for e in big:
+            m = fvals.get(e.id, {})
+            self._row(self.files, [e.longname, fmt_value(m.get("CountLineCode")), fmt_value(m.get("CountDeclFunction"))],
+                      e.id, M.FILE)
+        for lang, n in sorted(pm["Languages"].items()):
+            loc = db.conn.execute("SELECT COALESCE(SUM(m.value),0) FROM metrics m JOIN entities e ON e.id=m.entity_id "
+                                  "JOIN files f ON f.id=e.file_id WHERE e.kind='File' AND m.name='CountLineCode' "
+                                  "AND f.lang=?", (lang,)).fetchone()[0]
+            self._row(self.langs, [display_name(lang), n, f"{int(loc):,}"])
 
 
 def _squarify(items, x, y, w, h):
@@ -267,27 +337,28 @@ class TreemapCanvas(QWidget):
     def resizeEvent(self, e):
         self.relayout()
 
+    STOPS = ((0.0, (76, 154, 106)), (0.5, (214, 168, 74)), (1.0, (204, 84, 84)))
+
     def _color(self, v):
         lo, hi = self.color_range
         t = 0.0 if hi <= lo else (v - lo) / (hi - lo)
         t = math.sqrt(max(0.0, min(1.0, t)))
-        # green -> yellow -> red
-        if t < 0.5:
-            r, g, b = int(80 + 350 * t), 170, 90
-        else:
-            r, g, b = 235, int(170 - 260 * (t - 0.5)), 80
-        return QColor(min(r, 235), max(g, 50), b)
+        for (t0, c0), (t1, c1) in zip(self.STOPS, self.STOPS[1:]):
+            if t <= t1:
+                k = (t - t0) / (t1 - t0)
+                return QColor(*(round(a + (b - a) * k) for a, b in zip(c0, c1)))
+        return QColor(*self.STOPS[-1][1])
 
     def paintEvent(self, e):
         p = QPainter(self)
-        dark = theme.current["name"] == "dark"
-        p.fillRect(self.rect(), QColor("#1e1f22" if dark else "#ffffff"))
+        t = theme.tokens()
+        p.fillRect(self.rect(), QColor(t["bg"]))
         small = QFont(self.font())
         small.setPointSize(8)
         p.setFont(small)
         for r, (ent, s, c) in self.cells:
-            p.fillRect(r, self._color(c))
-            p.setPen(QPen(QColor("#ffffff"), 1))
+            p.fillRect(r.adjusted(0.5, 0.5, -0.5, -0.5), self._color(c))
+            p.setPen(QPen(QColor(t["bg"]), 1))
             p.drawRect(r)
             if r.width() > 40 and r.height() > 14:
                 p.setPen(QColor("#10161d"))
@@ -296,11 +367,11 @@ class TreemapCanvas(QWidget):
         bold.setBold(True)
         p.setFont(bold)
         for r, g in self.groups:
-            p.setPen(QPen(QColor("#555" if not dark else "#aaa"), 1.5))
+            p.setPen(QPen(QColor(t["border"]), 2))
             p.setBrush(Qt.NoBrush)
             p.drawRect(r)
             if r.height() > 40:
-                p.setPen(QColor("#dfe1e5" if dark else "#1f2328"))
+                p.setPen(QColor(t["fg"]))
                 p.drawText(r.adjusted(4, 1, -2, 0), Qt.AlignLeft | Qt.AlignTop, g)
 
     def _cell_at(self, pos):
@@ -418,8 +489,11 @@ class DependencyMatrix(QWidget):
         top.addWidget(QLabel("Level:"))
         top.addWidget(self.level)
         top.addStretch(1)
-        v = QVBoxLayout(self)
-        v.addLayout(top)
+        self.info.setObjectName("Muted")
+        self.info.setContentsMargins(10, 6, 10, 6)
+        self.table.setFrameShape(QTableWidget.NoFrame)
+        v = _page(self)
+        v.addWidget(_bar(top))
         v.addWidget(self.info)
         v.addWidget(self.table, 1)
         self.level.currentIndexChanged.connect(self.refresh)
@@ -447,7 +521,7 @@ class DependencyMatrix(QWidget):
         self.table.setVerticalHeaderLabels([f"{i + 1}. {l}" for i, l in enumerate(labels)])
         self.table.setHorizontalHeaderLabels([str(i + 1) for i in range(n)])
         mx = max(deps.values()) if deps else 1
-        dark = theme.current["name"] == "dark"
+        dark = theme.is_dark()
         for (a, b), cnt in deps.items():
             if a not in index or b not in index:
                 continue
@@ -464,7 +538,7 @@ class DependencyMatrix(QWidget):
             self.table.setItem(i, j, it)
         for i in range(n):
             it = QTableWidgetItem("")
-            it.setBackground(QColor("#888888"))
+            it.setBackground(QColor(theme.tokens()["border"]))
             self.table.setItem(i, i, it)
         self.table.horizontalHeader().setDefaultSectionSize(34)
         self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)

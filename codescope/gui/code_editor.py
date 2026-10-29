@@ -22,6 +22,7 @@ def mono_font(size=10):
             break
     f.setPointSize(size)
     f.setStyleHint(QFont.Monospace)
+    f.setStyleStrategy(QFont.PreferAntialias)
     return f
 
 
@@ -149,7 +150,8 @@ class CodeEditor(QPlainTextEdit):
     def apply_theme(self):
         th = theme.code_theme()
         self.setStyleSheet(f"QPlainTextEdit {{ background:{th['background']}; color:{th['foreground']};"
-                           f" selection-background-color:{th['selection']}; border:0; }}")
+                           f" selection-background-color:{th['selection']}; selection-color:{th['foreground']};"
+                           f" border:0; border-radius:0; padding:0; }}")
         if hasattr(self, "highlighter"):
             self.highlighter._build_formats()
             self.highlighter.relex()
@@ -159,7 +161,7 @@ class CodeEditor(QPlainTextEdit):
     # ---- line numbers -----------------------------------------------------------------
     def line_area_width(self):
         digits = max(3, len(str(self.blockCount())))
-        return 14 + self.fontMetrics().horizontalAdvance("9") * digits
+        return 28 + self.fontMetrics().horizontalAdvance("9") * digits
 
     def _update_width(self, *_):
         self.setViewportMargins(self.line_area_width(), 0, 0, 0)
@@ -187,8 +189,8 @@ class CodeEditor(QPlainTextEdit):
         p.setFont(self.font())
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
-                p.setPen(QColor(th["foreground"] if num == cur else th["linenumber_fg"]))
-                p.drawText(0, top, self.line_area.width() - 6, self.fontMetrics().height(),
+                p.setPen(QColor(th["linenumber_current"] if num == cur else th["linenumber_fg"]))
+                p.drawText(0, top, self.line_area.width() - 14, self.fontMetrics().height(),
                            Qt.AlignRight, str(num + 1))
             block = block.next()
             top = bottom
@@ -209,7 +211,7 @@ class CodeEditor(QPlainTextEdit):
             blk = self.document().findBlockByNumber(self._mark_line - 1)
             if blk.isValid():
                 s = QTextEdit.ExtraSelection()
-                s.format.setBackground(QColor("#ffe58f" if theme.current["name"] == "light" else "#5c4b16"))
+                s.format.setBackground(QColor(th["mark"]))
                 s.format.setProperty(QTextFormat.FullWidthSelection, True)
                 s.cursor = QTextCursor(blk)
                 sels.append(s)
@@ -301,9 +303,9 @@ class EditorPane(QWidget):
     def __init__(self, path, file_id, lang, parent=None):
         super().__init__(parent)
         self.editor = CodeEditor(path, file_id, lang, self)
-        self.find_bar = QWidget(self)
+        self.find_bar = QWidget(self, objectName="PanelBar")
         h = QHBoxLayout(self.find_bar)
-        h.setContentsMargins(4, 2, 4, 2)
+        h.setContentsMargins(8, 4, 8, 4)
         self.find_edit = QLineEdit(placeholderText="Find in file…")
         self.case = QCheckBox("Aa")
         self.case.setToolTip("Match case")

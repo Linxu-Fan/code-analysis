@@ -28,7 +28,7 @@ def main(argv=None):
     app.setOrganizationName("CodeScope")
     app.setWindowIcon(app_icon())
     settings = QSettings("CodeScope", "CodeScope")
-    theme.apply_theme(app, settings.value("theme", "light"))
+    theme.apply_theme(app, settings.value("theme", "dark"))
     win = MainWindow()
     win.show()
     for a in argv:

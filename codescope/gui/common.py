@@ -8,7 +8,6 @@ from PySide6.QtCore import QObject, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from ..core import model as M
-from ..core.style import node_style
 
 KIND_GROUPS = [
     ("All Entities", None),
@@ -30,6 +29,15 @@ _LETTERS = {
     M.METHOD: "m", M.CONSTRUCTOR: "c", M.PROPERTY: "p", M.FIELD: "v", M.VARIABLE: "v", M.PARAMETER: "a",
     M.LOCAL: "l",
 }
+# badge colours per kind (saturated enough for light and dark backgrounds)
+KIND_COLORS = {
+    M.FILE: "#7d8590", M.NAMESPACE: "#a371f7", M.PACKAGE: "#a371f7",
+    M.CLASS: "#d4962a", M.STRUCT: "#c9822a", M.UNION: "#c9822a", M.INTERFACE: "#c9a227",
+    M.ENUM: "#b07ee8", M.ENUMERATOR: "#9a7cc7", M.TYPEDEF: "#b07ee8", M.MACRO: "#e0703d",
+    M.FUNCTION: "#3fa96b", M.METHOD: "#2f9e9e", M.CONSTRUCTOR: "#2f9e9e",
+    M.PROPERTY: "#4f8fd9", M.FIELD: "#4f8fd9", M.VARIABLE: "#4f8fd9",
+    M.PARAMETER: "#6e7681", M.LOCAL: "#6e7681",
+}
 _ICON_CACHE = {}
 
 
@@ -37,41 +45,48 @@ def kind_icon(kind: str) -> QIcon:
     icon = _ICON_CACHE.get(kind)
     if icon is not None:
         return icon
-    fill, border, shape = node_style(kind)
-    if kind in (M.PARAMETER, M.LOCAL, M.ENUMERATOR, M.PROPERTY):
-        fill, border = "#eef1f4", "#6b7280"
-    pm = QPixmap(32, 32)
-    pm.fill(Qt.transparent)
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing)
-    p.setPen(QPen(QColor(border), 2))
-    p.setBrush(QColor(fill))
-    r = QRectF(3, 3, 26, 26)
-    if kind in M.FUNCTION_KINDS or kind == M.MACRO:
-        p.drawEllipse(r)
-    elif shape == "dashed":
-        pen = QPen(QColor(border), 2, Qt.DashLine)
-        p.setPen(pen)
-        p.drawRoundedRect(r, 5, 5)
-    elif kind == M.FILE:
-        path = QPainterPath()
-        path.moveTo(6, 3)
-        path.lineTo(20, 3)
-        path.lineTo(27, 10)
-        path.lineTo(27, 29)
-        path.lineTo(6, 29)
-        path.closeSubpath()
-        p.drawPath(path)
-    else:
-        p.drawRoundedRect(r, 5, 5)
-    p.setPen(QColor(border))
-    f = QFont()
-    f.setPixelSize(16)
-    f.setBold(True)
-    p.setFont(f)
-    p.drawText(r, Qt.AlignCenter, _LETTERS.get(kind, "?"))
-    p.end()
-    icon = QIcon(pm)
+    icon = QIcon()
+    unresolved = kind in M.UNRESOLVED_KINDS
+    color = QColor(KIND_COLORS.get(kind, "#8b949e"))
+    for size in (16, 20, 32, 40):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.scale(size / 32.0, size / 32.0)
+        r = QRectF(3, 3, 26, 26)
+        if unresolved:
+            pen = QPen(QColor("#8b949e"), 2.2, Qt.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.NoBrush)
+            p.drawRoundedRect(r, 7, 7)
+            p.setPen(QColor("#8b949e"))
+            letter = "?"
+        else:
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            if kind in M.FUNCTION_KINDS or kind == M.MACRO:
+                p.drawEllipse(r)
+            elif kind == M.FILE:
+                path = QPainterPath()
+                path.moveTo(7, 2)
+                path.lineTo(20, 2)
+                path.lineTo(27, 9)
+                path.lineTo(27, 30)
+                path.lineTo(7, 30)
+                path.closeSubpath()
+                p.drawPath(path)
+            else:
+                p.drawRoundedRect(r, 7, 7)
+            p.setPen(QColor("#ffffff"))
+            letter = _LETTERS.get(kind, "?")
+        f = QFont()
+        f.setPixelSize(18)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(QRectF(0, 1, 32, 32), Qt.AlignCenter, letter)
+        p.end()
+        icon.addPixmap(pm)
     _ICON_CACHE[kind] = icon
     return icon
 

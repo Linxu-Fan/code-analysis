@@ -5,7 +5,7 @@ from __future__ import annotations
 import posixpath
 
 from PySide6.QtCore import QSortFilterProxyModel, Qt, QTimer, Signal
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QFont, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu, QTreeView,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
@@ -40,9 +40,14 @@ class ProjectTree(QWidget):
         self.proxy.setRecursiveFilteringEnabled(True)
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.view.setModel(self.proxy)
+        self.view.setFrameShape(QTreeView.NoFrame)
         v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(self.filter)
+        v.setContentsMargins(0, 6, 0, 0)
+        v.setSpacing(6)
+        box = QHBoxLayout()
+        box.setContentsMargins(6, 0, 6, 0)
+        box.addWidget(self.filter)
+        v.addLayout(box)
         v.addWidget(self.view)
         self.filter.textChanged.connect(self._filter)
         self.view.expanded.connect(self._expand)
@@ -154,13 +159,20 @@ class EntityFilter(QWidget):
         self.proxy.setFilterCaseSensitivity(Qt.CaseInsensitive)
         self.proxy.setFilterKeyColumn(-1)
         self.view.setModel(self.proxy)
+        self.view.setFrameShape(QTreeView.NoFrame)
+        self.count.setObjectName("Muted")
         top = QHBoxLayout()
+        top.setContentsMargins(6, 0, 6, 0)
         top.addWidget(self.kind_box, 1)
         top.addWidget(self.count)
+        flt = QHBoxLayout()
+        flt.setContentsMargins(6, 0, 6, 0)
+        flt.addWidget(self.filter)
         v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
+        v.setContentsMargins(0, 6, 0, 0)
+        v.setSpacing(6)
         v.addLayout(top)
-        v.addWidget(self.filter)
+        v.addLayout(flt)
         v.addWidget(self.view)
         self._timer = QTimer(self, singleShot=True, interval=150, timeout=self._apply_filter)
         self.filter.textChanged.connect(self._timer.start)
@@ -219,8 +231,8 @@ class EntityFilter(QWidget):
         for r in rows:
             root.appendRow(r)
         self.view.header().setSectionResizeMode(0, QHeaderView.Interactive)
-        self.view.setColumnWidth(0, 200)
-        self.view.setColumnWidth(1, 90)
+        self.view.setColumnWidth(0, 190)
+        self.view.setColumnWidth(1, 100)
         self._apply_filter()
 
 
@@ -238,7 +250,13 @@ class InfoBrowser(QTreeWidget):
         self.db = None
         self.entity = None
         self.setHeaderHidden(True)
-        self.setColumnCount(1)
+        self.setFrameShape(QTreeWidget.NoFrame)
+        self.setColumnCount(2)
+        self.setIndentation(14)
+        self.setUniformRowHeights(False)
+        self.setRootIsDecorated(True)
+        self.setAllColumnsShowFocus(True)
+        self.header().setStretchLastSection(True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.itemClicked.connect(self._clicked)
         self.itemDoubleClicked.connect(self._double)
@@ -251,8 +269,16 @@ class InfoBrowser(QTreeWidget):
         self.entity = None
         self.clear()
 
-    def _item(self, parent, text, eid=None, file_id=None, line=None, icon_kind=None, tip=None):
-        it = QTreeWidgetItem(parent, [text])
+    def refresh_theme(self):
+        if self.entity is not None:
+            self.show_entity(self.entity.id)
+
+    def _muted(self):
+        from . import theme
+        return QColor(theme.tokens()["muted"])
+
+    def _item(self, parent, text, eid=None, file_id=None, line=None, icon_kind=None, tip=None, value=None):
+        it = QTreeWidgetItem(parent, [text, value or ""])
         if eid is not None:
             it.setData(0, ROLE_ID, eid)
         if file_id is not None:
@@ -262,11 +288,20 @@ class InfoBrowser(QTreeWidget):
             it.setIcon(0, kind_icon(icon_kind))
         if tip:
             it.setToolTip(0, tip)
+            it.setToolTip(1, tip)
+        it.setForeground(1, self._muted())
+        return it
+
+    def _prop(self, key, value, **kw):
+        it = self._item(self, key, value=value, **kw)
+        it.setForeground(0, self._muted())
+        it.setForeground(1, QColor(self.palette().color(self.palette().ColorRole.Text)))
+        it.setToolTip(1, value)
         return it
 
     def _loc(self, file_id, line):
         f = self.db.file(file_id) if file_id else None
-        return f"{f.relpath}({line})" if f else ""
+        return f"{f.relpath}:{line}" if f else ""
 
     def show_entity(self, eid):
         if self.db is None:
@@ -275,28 +310,37 @@ class InfoBrowser(QTreeWidget):
         if e is None:
             return
         self.entity = e
+        self.setUpdatesEnabled(False)
         self.clear()
         db = self.db
-        title = self._item(self, e.longname, e.id, e.file_id, e.line, e.kind)
+        title = self._item(self, e.longname if e.kind == M.FILE else e.name, e.id, e.file_id, e.line, e.kind)
         f = title.font(0)
         f.setBold(True)
+        f.setPointSizeF(f.pointSizeF() * 1.12)
         title.setFont(0, f)
-        self._item(self, f"Kind: {e.kind}")
+        title.setFirstColumnSpanned(True)
+        title.setToolTip(0, e.longname)
+        if e.longname != title.text(0):
+            sub = self._item(self, e.longname)
+            sub.setFirstColumnSpanned(True)
+            sub.setForeground(0, self._muted())
+        self._prop("Kind", e.kind)
         if e.lang:
-            self._item(self, f"Language: {display_name(e.lang)}")
+            self._prop("Language", display_name(e.lang))
         if e.signature:
-            self._item(self, f"Signature: {e.signature}", tip=e.signature)
+            self._prop("Signature", e.signature, tip=e.signature)
         if e.type:
-            self._item(self, f"Type: {e.type}")
+            self._prop("Type", e.type)
         if e.modifiers:
-            self._item(self, f"Modifiers: {e.modifiers}")
+            self._prop("Modifiers", e.modifiers)
         if e.file_id:
-            self._item(self, f"Defined in: {self._loc(e.file_id, e.line)}", file_id=e.file_id, line=e.line)
+            self._prop("Defined in", self._loc(e.file_id, e.line), file_id=e.file_id, line=e.line)
         for d in db.declarations(e.id):
-            self._item(self, f"Declared in: {self._loc(d.file_id, d.line)}", file_id=d.file_id, line=d.line)
+            self._prop("Declared in", self._loc(d.file_id, d.line), file_id=d.file_id, line=d.line)
         parent = db.parent(e)
         if parent is not None and parent.kind != M.FILE:
-            self._item(self, f"Parent: {parent.longname}", parent.id, icon_kind=parent.kind)
+            it = self._prop("Parent", parent.longname, eid=parent.id)
+            it.setIcon(1, kind_icon(parent.kind))
         # relationships
         sections = []
         if e.kind == M.FILE:
@@ -315,24 +359,32 @@ class InfoBrowser(QTreeWidget):
             ins = db.related(e.id, (kind,), reverse=True)
             if ins:
                 sections.append((back, ins))
+        bold = QFont(self.font())
+        bold.setBold(True)
         for label, ents in sections:
-            sec = self._item(self, f"{label.replace('&&', '&')} ({len(ents)})")
+            sec = self._item(self, label.replace("&&", "&"), value=str(len(ents)))
+            sec.setFont(0, bold)
             sec.setData(0, ROLE_LOADED, ents)
-            sec.addChild(QTreeWidgetItem(["…"]))
+            sec.addChild(QTreeWidgetItem(["\u2026"]))
             if len(ents) <= 20:
                 sec.setExpanded(True)
         refs = db.refs_to(e.id) + db.refs_from(e.id, resolved=False)
         if refs:
-            sec = self._item(self, f"References ({len(refs)})")
+            sec = self._item(self, "References", value=str(len(refs)))
+            sec.setFont(0, bold)
             sec.setData(0, ROLE_LOADED, ("refs", refs))
-            sec.addChild(QTreeWidgetItem(["…"]))
+            sec.addChild(QTreeWidgetItem(["\u2026"]))
         m = db.metrics(e.id)
         if m:
-            sec = self._item(self, "Metrics")
+            sec = self._item(self, "Metrics", value=str(len(m)))
+            sec.setFont(0, bold)
             for k in sorted(m):
-                self._item(sec, f"{k}: {fmt_value(m[k])}", tip=METRIC_DESCRIPTIONS.get(k, ""))
+                it = self._item(sec, k, value=fmt_value(m[k]), tip=METRIC_DESCRIPTIONS.get(k, ""))
+                it.setForeground(1, QColor(self.palette().color(self.palette().ColorRole.Text)))
             sec.setExpanded(e.kind in M.FUNCTION_KINDS)
-        title.setExpanded(True)
+        self.resizeColumnToContents(0)
+        self.setColumnWidth(0, min(max(self.columnWidth(0), 110), 180))
+        self.setUpdatesEnabled(True)
 
     def _expand(self, item):
         data = item.data(0, ROLE_LOADED)
@@ -345,18 +397,20 @@ class InfoBrowser(QTreeWidget):
             for r in data[1][: self.MAX_ITEMS]:
                 if r.dst_id == e.id:
                     other = self.db.entity(r.src_id)
-                    text = f"{r.kind} by {other.longname if other else '?'}  {self._loc(r.file_id, r.line)}"
+                    text = f"{r.kind} by {other.name if other else '?'}"
+                    icon = other.kind if other else None
                 else:
-                    text = f"{r.kind}s {r.name}{' (unresolved)' if r.dst_id is None else ''}  {self._loc(r.file_id, r.line)}"
-                self._item(item, text, file_id=r.file_id, line=r.line)
+                    text = f"{r.kind}s {r.name}" + (" (unresolved)" if r.dst_id is None else "")
+                    icon = None
+                self._item(item, text, file_id=r.file_id, line=r.line, icon_kind=icon,
+                           value=self._loc(r.file_id, r.line))
             return
         for x in data[: self.MAX_ITEMS]:
             loc = self._loc(x.file_id, x.line) if x.file_id else "unresolved"
-            it = self._item(item, f"{x.name if x.kind != M.FILE else x.longname}   {loc}", x.id, x.file_id, x.line,
-                            x.kind, tip=f"{x.kind}: {x.longname}")
-            del it
+            self._item(item, x.name if x.kind != M.FILE else x.longname, x.id, x.file_id, x.line,
+                       x.kind, tip=f"{x.kind}: {x.longname}", value=loc)
         if len(data) > self.MAX_ITEMS:
-            self._item(item, f"… {len(data) - self.MAX_ITEMS} more")
+            self._item(item, f"\u2026 {len(data) - self.MAX_ITEMS} more")
 
     def _clicked(self, item, col):
         # selecting an item only highlights it; double click navigates, context menu offers more

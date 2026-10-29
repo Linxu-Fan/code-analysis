@@ -10,12 +10,12 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QPainte
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGraphicsItem, QGraphicsPathItem,
                                QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QLabel,
                                QLineEdit,
-                               QMessageBox, QSpinBox, QToolButton, QVBoxLayout, QWidget)
+                               QMessageBox, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..core import graphs as G
 from ..core import model as M
 from ..core.layout import layout
-from ..core.style import EDGE_COLORS, FOCUS_BORDER, node_style
+from ..core.style import EDGE_COLORS, FOCUS_BORDER, node_style, node_style_dark
 from ..core.svg import to_dot, to_svg
 from . import theme
 
@@ -73,20 +73,18 @@ class NodeItem(QGraphicsItem):
 
     def paint(self, painter, option, widget=None):
         n = self.node
-        fill, border, shape = node_style(n.kind)
-        dark = theme.current["name"] == "dark"
+        dark = theme.is_dark()
+        fill, border, shape = (node_style_dark(n.kind, theme.tokens()["bg"]) if dark else node_style(n.kind))
         if n.style.get("focus"):
             border = FOCUS_BORDER
         pen = QPen(QColor(border), 2.4 if (n.style.get("focus") or self.isSelected()) else 1.2)
         if shape == "dashed":
             pen.setStyle(Qt.DashLine)
         if self.isSelected():
-            pen.setColor(QColor("#1f6feb"))
+            pen.setColor(QColor(theme.tokens()["accent"]))
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(pen)
         fc = QColor(fill)
-        if dark and not n.kind.startswith("cfg:start") and not n.kind.startswith("cfg:end"):
-            fc = fc.darker(330)
         if self.hover:
             fc = fc.lighter(110) if not dark else fc.lighter(140)
         painter.setBrush(QBrush(fc))
@@ -99,7 +97,7 @@ class NodeItem(QGraphicsItem):
         lh = fm.height()
         y = -len(lines) * lh / 2
         text_color = QColor("#ffffff") if n.kind in ("cfg:start", "cfg:end") else \
-            QColor("#e6e6e6" if dark else "#1f2328")
+            QColor(theme.tokens()["fg"])
         for i, ln in enumerate(lines):
             rect = QRectF(-n.width / 2 + 8, y + i * lh, n.width - 16, lh)
             if uml and ln.startswith("─"):
@@ -207,7 +205,7 @@ class GraphCanvas(QGraphicsView):
         self.node_items = {}
         self.edge_items = []          # (edge, path item, label item or None)
         self.highlighted = None
-        bg = QColor("#1e1f22" if theme.current["name"] == "dark" else "#ffffff")
+        bg = QColor(theme.tokens()["bg"])
         sc.setBackgroundBrush(bg)
         maxw = max((e.weight for e in g.edges), default=1.0)
         for e in g.edges:
@@ -358,8 +356,11 @@ class GraphPanel(QWidget):
         self.kind = kind
         self.entity = entity
         self.canvas = GraphCanvas(self)
-        bar = QHBoxLayout()
-        bar.setContentsMargins(6, 4, 6, 4)
+        self.canvas.setFrameShape(GraphCanvas.NoFrame)
+        bar_w = QWidget(objectName="PanelBar")
+        bar = QHBoxLayout(bar_w)
+        bar.setContentsMargins(8, 5, 8, 5)
+        bar.setSpacing(6)
         self.type_box = QComboBox()
         if entity is not None:
             for k in G.graphs_for(entity):
@@ -373,6 +374,7 @@ class GraphPanel(QWidget):
             idx = self.type_box.count() - 1
         self.type_box.setCurrentIndex(idx)
         self.depth = QSpinBox(minimum=1, maximum=10, value=3)
+        self.depth.setFixedWidth(64)
         self.depth_label = QLabel("Depth:")
         self.hide_unres = QCheckBox("Hide unresolved")
         self.lr = QCheckBox("Left to right")
@@ -381,9 +383,9 @@ class GraphPanel(QWidget):
         self.labels = QCheckBox("Edge labels")
         self.labels.setChecked(True)
         self.find_box = QLineEdit(placeholderText="Find node\u2026", clearButtonEnabled=True)
-        self.find_box.setMaximumWidth(180)
-        self.note = QLabel()
-        self.note.setStyleSheet("color:#b35900")
+        self.find_box.setMinimumWidth(150)
+        self.find_box.setMaximumWidth(200)
+        self.note = QLabel(objectName="Note")
         self.note.setMaximumWidth(320)
         bar.addWidget(QLabel("Graph:"))
         bar.addWidget(self.type_box)
@@ -407,7 +409,7 @@ class GraphPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        v.addLayout(bar)
+        v.addWidget(bar_w)
         v.addWidget(self.canvas)
         self.type_box.currentIndexChanged.connect(self.refresh)
         self.depth.valueChanged.connect(self.refresh)
@@ -439,8 +441,7 @@ class GraphPanel(QWidget):
 
     def _find(self, text):
         n = self.canvas.find(text)
-        self.find_box.setStyleSheet("" if n or not text else "background:#5c1f1f" if
-                                    theme.current["name"] == "dark" else "background:#ffd6d6")
+        self.find_box.setStyleSheet("" if n or not text else f"border-color:{theme.tokens()['error']}")
 
     @property
     def title(self):

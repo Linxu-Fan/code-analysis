@@ -6,6 +6,11 @@ you browse, graph, measure and check it, from a desktop GUI or from the command 
 
 ![Editor with information browser](docs/screenshots/02_editor.png)
 
+The interface uses a dark theme by default, inspired by Understand's workspace. A light theme is one
+click away (moon icon, or **View → Dark Theme**).
+
+![Light theme](docs/screenshots/02_editor_light.png)
+
 ## Features
 
 | Area | What you get |
@@ -27,6 +32,7 @@ you browse, graph, measure and check it, from a desktop GUI or from the command 
 | ![Call graph](docs/screenshots/03_calls.png) | ![UML](docs/screenshots/04_uml.png) |
 | ![Control flow](docs/screenshots/05_cfg.png) | ![Treemap](docs/screenshots/07_treemap.png) |
 | ![CodeCheck](docs/screenshots/09_codecheck.png) | ![Dependency matrix](docs/screenshots/08_dsm.png) |
+| ![Start page](docs/screenshots/00_welcome.png) | ![Project overview](docs/screenshots/01_overview.png) |
 
 ## Installing on Windows
 

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
-import webbrowser
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QCompleter, QDockWidget, QFileDialog, QLabel, QLineEdit,
-                               QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QTabWidget,
-                               QTextBrowser, QToolBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QCompleter, QDockWidget, QFileDialog, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+                               QProgressBar, QPushButton, QSizePolicy, QTabWidget, QToolBar, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..core import model as M
@@ -18,7 +18,7 @@ from ..core.graphs import GRAPH_TYPES, graphs_for
 from . import theme
 from .browsers import EntityFilter, InfoBrowser, ProjectTree
 from .code_editor import EditorPane
-from .common import Worker, app_icon
+from .common import Worker, app_icon, kind_icon
 from .graph_view import GraphPanel
 from .metrics_view import DependencyMatrix, MetricsBrowser, ProjectSummary, TreemapView
 from .panels import CodeCheckPanel, FindInFiles, ProjectDialog
@@ -26,47 +26,129 @@ from .panels import CodeCheckPanel, FindInFiles, ProjectDialog
 MAX_RECENT = 10
 
 
-class WelcomePage(QTextBrowser):
+class WelcomePage(QWidget):
+    """Start page: create / open a project and reopen recent ones."""
+
     def __init__(self, win):
-        super().__init__()
+        super().__init__(objectName="Page")
         self.win = win
-        self.title = "Welcome"
-        self.setOpenLinks(False)
-        self.anchorClicked.connect(self._link)
+        self.title = "Start Page"
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(48, 40, 48, 40)
+        outer.setSpacing(48)
+        left = QVBoxLayout()
+        left.setSpacing(10)
+        logo = QLabel()
+        logo.setPixmap(app_icon().pixmap(56, 56))
+        head = QHBoxLayout()
+        head.addWidget(logo)
+        titles = QVBoxLayout()
+        titles.addWidget(QLabel(APP_NAME, objectName="Hero"))
+        titles.addWidget(QLabel(f"Code comprehension for C, C++ and Python \u00b7 version {__version__}",
+                                objectName="Muted"))
+        head.addLayout(titles)
+        head.addStretch(1)
+        left.addLayout(head)
+        left.addSpacing(18)
+        left.addWidget(QLabel("START", objectName="Section"))
+        for text, sub, icon_name, slot in (
+                ("New Project\u2026", "Analyze a source tree", "new", win.new_project),
+                ("Open Project\u2026", "Open an existing .csdb project", "open", win.open_project_dialog)):
+            b = QPushButton(f"{text}\n{sub}", objectName="Tile")
+            b.setIcon(theme.icon(icon_name))
+            b.setIconSize(b.iconSize() * 1.6)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(slot)
+            b.setMinimumHeight(58)
+            left.addWidget(b)
+        left.addSpacing(18)
+        left.addWidget(QLabel("RECENT PROJECTS", objectName="Section"))
+        self.recent = QListWidget(objectName="Recent")
+        self.recent.setFrameShape(QListWidget.NoFrame)
+        self.recent.itemActivated.connect(self._open_recent)
+        self.recent.itemClicked.connect(self._open_recent)
+        self.recent.setCursor(Qt.PointingHandCursor)
+        left.addWidget(self.recent, 1)
+        right = QVBoxLayout()
+        right.setSpacing(8)
+        right.addWidget(QLabel("GETTING STARTED", objectName="Section"))
+        tips = QLabel(
+            "<p><b>Navigate</b><br>Ctrl+click or F12 jumps to a definition; Alt+\u2190 / Alt+\u2192 goes back "
+            "and forward.</p>"
+            "<p><b>Understand relationships</b><br>Select any entity to see its callers, callees, members, base "
+            "classes and references in the Information browser.</p>"
+            "<p><b>Visualize</b><br>Right-click an entity for call trees, butterfly, inheritance, UML and control "
+            "flow graphs. Graphs \u2192 Architecture shows dependencies between folders.</p>"
+            "<p><b>Measure and check</b><br>Metrics, treemaps and a dependency matrix reveal hot spots; CodeCheck "
+            "finds dead code, complexity and risky constructs.</p>"
+            "<p><b>Search</b><br>Ctrl+E finds an entity by name, Ctrl+Shift+F searches all files.</p>")
+        tips.setWordWrap(True)
+        tips.setObjectName("Muted")
+        tips.setTextFormat(Qt.RichText)
+        tips.setMaximumWidth(420)
+        right.addWidget(tips)
+        right.addStretch(1)
+        outer.addLayout(left, 3)
+        outer.addLayout(right, 2)
         self.refresh()
 
     def refresh(self):
-        recent = self.win.recent_projects()
-        items = "".join(f"<li><a href='open:{i}'>{os.path.basename(p)}</a> <span style='color:#888'>{p}</span></li>"
-                        for i, p in enumerate(recent)) or "<li style='color:#888'>No recent projects</li>"
-        fg = "#dfe1e5" if theme.current["name"] == "dark" else "#1f2328"
-        self.setHtml(f"""<div style='margin:30px;color:{fg};font-family:Segoe UI,sans-serif'>
-            <h1 style='font-weight:600'>{APP_NAME}</h1>
-            <p style='color:#888'>Static analysis and code comprehension for C, C++ and Python &mdash; version {__version__}</p>
-            <h3>Start</h3><ul>
-            <li><a href='new:'>Create a new project&hellip;</a> (Ctrl+N)</li>
-            <li><a href='openfile:'>Open an existing project&hellip;</a> (Ctrl+O)</li></ul>
-            <h3>Recent projects</h3><ul>{items}</ul>
-            <h3>Tips</h3><ul>
-            <li>Ctrl+click or F12 on an identifier jumps to its definition.</li>
-            <li>Right-click any entity for its graphs: call trees, butterfly, inheritance, UML and control flow.</li>
-            <li>Ctrl+Shift+F searches all project files; Ctrl+E finds an entity by name.</li>
-            <li>The Metrics menu offers a sortable metrics browser, a treemap and a dependency matrix.</li></ul></div>""")
+        self.recent.clear()
+        for p in self.win.recent_projects():
+            it = QListWidgetItem(theme.icon("project"), f"{os.path.splitext(os.path.basename(p))[0]}\n{p}")
+            it.setData(Qt.UserRole, p)
+            it.setToolTip(p)
+            self.recent.addItem(it)
+        if not self.recent.count():
+            it = QListWidgetItem("No recent projects yet")
+            it.setFlags(Qt.NoItemFlags)
+            self.recent.addItem(it)
+        self.recent.setIconSize(self.recent.iconSize().expandedTo(QSize(22, 22)))
 
-    def _link(self, url):
-        s = url.toString()
-        if s.startswith("new:"):
-            self.win.new_project()
-        elif s.startswith("openfile:"):
-            self.win.open_project_dialog()
-        elif s.startswith("open:"):
-            recent = self.win.recent_projects()
-            i = int(s[5:])
-            if i < len(recent):
-                self.win.open_project(recent[i])
+    def _open_recent(self, item):
+        p = item.data(Qt.UserRole)
+        if p:
+            self.win.open_project(p)
+
+
+class PanelHeader(QWidget):
+    """Slim tool strip used at the top of dock panels."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, objectName="PanelBar")
+        self.lay = QHBoxLayout(self)
+        self.lay.setContentsMargins(6, 3, 6, 3)
+        self.lay.setSpacing(2)
+
+    def button(self, icon_name, tip, slot, text=None):
+        b = QToolButton()
+        b.setIcon(theme.icon(icon_name))
+        b.setToolTip(tip)
+        b.setAutoRaise(True)
+        b.setProperty("iconName", icon_name)
+        if text:
+            b.setText(text)
+            b.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        if slot:
+            b.clicked.connect(slot)
+        self.lay.addWidget(b)
+        return b
+
+
+class SizedBox(QWidget):
+    """Container with a preferred width, so docks open at a useful size."""
+
+    def __init__(self, width, parent=None):
+        super().__init__(parent)
+        self._w = width
+
+    def sizeHint(self):
+        return QSize(self._w, 600)
 
 
 class MainWindow(QMainWindow):
+    STATE_KEY = "windowState/v2"
+
     def __init__(self):
         super().__init__()
         self.settings = QSettings("CodeScope", "CodeScope")
@@ -75,10 +157,12 @@ class MainWindow(QMainWindow):
         self.nav_back, self.nav_fwd = [], []
         self.info_back, self.info_fwd = [], []
         self.current_entity = None
+        self._themed = []                # (object, icon name) pairs re-coloured on theme change
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(app_icon())
         self.resize(1440, 900)
         self.setAcceptDrops(True)
+        self.setDockOptions(QMainWindow.AnimatedDocks | QMainWindow.AllowTabbedDocks)
         self._build_central()
         self._build_docks()
         self._build_actions()
@@ -88,10 +172,16 @@ class MainWindow(QMainWindow):
         geo = self.settings.value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
-        state = self.settings.value("windowState")
-        if state is not None:
-            self.restoreState(state)
+        state = self.settings.value(self.STATE_KEY)
+        self._default_layout = state is None or not self.restoreState(state)
         self._update_actions()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._default_layout:
+            self._default_layout = False
+            QTimer.singleShot(0, lambda: self.resizeDocks([self.dock_project, self.dock_info], [290, 380],
+                                                          Qt.Horizontal))
 
     # ---- construction -------------------------------------------------------------------------
     def _build_central(self):
@@ -99,15 +189,27 @@ class MainWindow(QMainWindow):
         self.tabs.setTabsClosable(True)
         self.tabs.setMovable(True)
         self.tabs.setDocumentMode(True)
+        self.tabs.setElideMode(Qt.ElideNone)
+        self.tabs.setUsesScrollButtons(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.setCentralWidget(self.tabs)
         self.welcome = WelcomePage(self)
-        self.tabs.addTab(self.welcome, "Welcome")
+        self.tabs.addTab(self.welcome, app_icon(), "Start Page")
+
+    @staticmethod
+    def _sized(widget, width):
+        box = SizedBox(width)
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(widget)
+        return box
 
     def _dock(self, title, widget, area, name):
         d = QDockWidget(title, self)
         d.setObjectName(name)
         d.setWidget(widget)
+        d.setFeatures(QDockWidget.DockWidgetClosable | QDockWidget.DockWidgetMovable |
+                      QDockWidget.DockWidgetFloatable)
         self.addDockWidget(area, d)
         return d
 
@@ -116,27 +218,25 @@ class MainWindow(QMainWindow):
         self.entity_filter = EntityFilter()
         self.info = InfoBrowser()
         self.find_panel = FindInFiles()
-        self.dock_project = self._dock("Project", self.project_tree, Qt.LeftDockWidgetArea, "dock_project")
-        self.dock_entities = self._dock("Entities", self.entity_filter, Qt.LeftDockWidgetArea, "dock_entities")
+        self.dock_project = self._dock("Project Browser", self._sized(self.project_tree, 290), Qt.LeftDockWidgetArea,
+                                       "dock_project")
+        self.dock_entities = self._dock("Entity Filter", self._sized(self.entity_filter, 290), Qt.LeftDockWidgetArea,
+                                        "dock_entities")
         self.tabifyDockWidget(self.dock_project, self.dock_entities)
         self.dock_project.raise_()
-        info_box = QWidget()
+        info_box = SizedBox(380)
         iv = QVBoxLayout(info_box)
         iv.setContentsMargins(0, 0, 0, 0)
-        bar = QToolBar()
-        bar.setIconSize(bar.iconSize() * 0.8)
-        self.info_back_act = bar.addAction(self.style().standardIcon(self.style().StandardPixmap.SP_ArrowBack),
-                                           "Previous entity", self._info_back)
-        self.info_fwd_act = bar.addAction(self.style().standardIcon(self.style().StandardPixmap.SP_ArrowForward),
-                                          "Next entity", self._info_fwd)
-        bar.addSeparator()
-        self.info_graph_btn = QPushButton("Graphs ▾")
-        self.info_graph_btn.setFlat(True)
-        self.info_graph_btn.clicked.connect(self._info_graph_menu)
-        bar.addWidget(self.info_graph_btn)
+        iv.setSpacing(0)
+        bar = PanelHeader()
+        self.info_back_btn = bar.button("back", "Previous entity", self._info_back)
+        self.info_fwd_btn = bar.button("forward", "Next entity", self._info_fwd)
+        bar.lay.addStretch(1)
+        self.info_graph_btn = bar.button("graph", "Graphs of this entity", self._info_graph_menu, "Graphs")
+        self._themed += [(self.info_back_btn, "back"), (self.info_fwd_btn, "forward"), (self.info_graph_btn, "graph")]
         iv.addWidget(bar)
         iv.addWidget(self.info)
-        self.dock_info = self._dock("Information", info_box, Qt.RightDockWidgetArea, "dock_info")
+        self.dock_info = self._dock("Information Browser", info_box, Qt.RightDockWidgetArea, "dock_info")
         self.dock_find = self._dock("Find in Files", self.find_panel, Qt.BottomDockWidgetArea, "dock_find")
         self.dock_find.hide()
         for w in (self.project_tree, self.entity_filter, self.info):
@@ -146,47 +246,47 @@ class MainWindow(QMainWindow):
         self.info.locationActivated.connect(self.open_location)
         self.find_panel.locationActivated.connect(self.open_location)
 
-    def _act(self, text, slot, shortcut=None, tip=None):
+    def _act(self, text, slot, shortcut=None, tip=None, icon=None):
         a = QAction(text, self)
         a.triggered.connect(slot)
         if shortcut:
             a.setShortcut(QKeySequence(shortcut))
-        if tip:
-            a.setStatusTip(tip)
+        tip = tip or text.replace("&", "").rstrip("\u2026")
+        a.setToolTip(tip + (f"  ({shortcut})" if shortcut else ""))
+        a.setStatusTip(tip)
+        if icon:
+            a.setIcon(theme.icon(icon))
+            self._themed.append((a, icon))
         return a
 
     def _build_actions(self):
-        st = self.style().standardIcon
-        SP = self.style().StandardPixmap
-        self.a_new = self._act("&New Project…", self.new_project, "Ctrl+N")
-        self.a_new.setIcon(st(SP.SP_FileIcon))
-        self.a_open = self._act("&Open Project…", self.open_project_dialog, "Ctrl+O")
-        self.a_open.setIcon(st(SP.SP_DialogOpenButton))
+        self.a_new = self._act("&New Project\u2026", self.new_project, "Ctrl+N", icon="new")
+        self.a_open = self._act("&Open Project\u2026", self.open_project_dialog, "Ctrl+O", icon="open")
         self.a_close = self._act("&Close Project", self.close_project)
-        self.a_save = self._act("&Save File", self.save_current, "Ctrl+S")
-        self.a_save.setIcon(st(SP.SP_DialogSaveButton))
+        self.a_save = self._act("&Save File", self.save_current, "Ctrl+S", icon="save")
         self.a_exit = self._act("E&xit", self.close, "Ctrl+Q")
-        self.a_config = self._act("&Configure Project…", self.configure_project)
-        self.a_analyze = self._act("&Analyze Changed Files", lambda: self.analyze(False), "F5")
-        self.a_analyze.setIcon(st(SP.SP_BrowserReload))
+        self.a_config = self._act("&Configure Project\u2026", self.configure_project, icon="settings")
+        self.a_analyze = self._act("&Analyze Changed Files", lambda: self.analyze(False), "F5", icon="analyze")
         self.a_full = self._act("Analyze &All Files", lambda: self.analyze(True), "Ctrl+F5")
-        self.a_overview = self._act("Project &Overview", self.show_overview)
-        self.a_find = self._act("&Find in Files…", self.find_in_files, "Ctrl+Shift+F")
-        self.a_find_entity = self._act("Find &Entity…", lambda: (self.quick.setFocus(), self.quick.selectAll()),
-                                       "Ctrl+E")
-        self.a_back = self._act("&Back", self.go_back, "Alt+Left")
-        self.a_back.setIcon(st(SP.SP_ArrowBack))
-        self.a_fwd = self._act("&Forward", self.go_forward, "Alt+Right")
-        self.a_fwd.setIcon(st(SP.SP_ArrowForward))
-        self.a_metrics = self._act("&Metrics Browser", lambda: self.add_tab(MetricsBrowser(self.db), connect=True))
-        self.a_treemap = self._act("Metrics &Treemap", lambda: self.add_tab(TreemapView(self.db), connect=True))
-        self.a_dsm = self._act("&Dependency Matrix", lambda: self.add_tab(DependencyMatrix(self.db), connect=True))
-        self.a_export_metrics = self._act("&Export Metrics (CSV)…", self.export_metrics)
-        self.a_arch = self._act("&Architecture Graph", lambda: self.open_graph("architecture", None))
-        self.a_uml = self._act("Project &UML Class Diagram", lambda: self.open_graph("uml", None))
-        self.a_codecheck = self._act("&CodeCheck…", self.open_codecheck, "Ctrl+Shift+K")
-        self.a_report = self._act("&HTML Report…", self.html_report)
-        self.a_dark = self._act("&Dark Theme", self.toggle_theme)
+        self.a_overview = self._act("Project &Overview", self.show_overview, icon="info")
+        self.a_find = self._act("&Find in Files\u2026", self.find_in_files, "Ctrl+Shift+F", icon="find_files")
+        self.a_find_entity = self._act("Find &Entity\u2026", lambda: (self.quick.setFocus(), self.quick.selectAll()),
+                                       "Ctrl+E", icon="search")
+        self.a_back = self._act("&Back", self.go_back, "Alt+Left", icon="back")
+        self.a_fwd = self._act("&Forward", self.go_forward, "Alt+Right", icon="forward")
+        self.a_metrics = self._act("&Metrics Browser", lambda: self.add_tab(MetricsBrowser(self.db), connect=True,
+                                                                          icon="metrics"), icon="metrics")
+        self.a_treemap = self._act("Metrics &Treemap", lambda: self.add_tab(TreemapView(self.db), connect=True,
+                                                                          icon="treemap"), icon="treemap")
+        self.a_dsm = self._act("&Dependency Matrix", lambda: self.add_tab(DependencyMatrix(self.db), connect=True,
+                                                                        icon="dsm"), icon="dsm")
+        self.a_export_metrics = self._act("&Export Metrics (CSV)\u2026", self.export_metrics)
+        self.a_arch = self._act("&Architecture Graph", lambda: self.open_graph("architecture", None),
+                                icon="architecture")
+        self.a_uml = self._act("Project &UML Class Diagram", lambda: self.open_graph("uml", None), icon="uml")
+        self.a_codecheck = self._act("&CodeCheck\u2026", self.open_codecheck, "Ctrl+Shift+K", icon="check")
+        self.a_report = self._act("&HTML Report\u2026", self.html_report, icon="report")
+        self.a_dark = self._act("&Dark Theme", self.toggle_theme, icon="theme")
         self.a_dark.setCheckable(True)
         self.a_about = self._act("&About", self.about)
         self.a_docs = self._act("&Command Line Usage", self.cli_help)
@@ -210,7 +310,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_find, self.a_find_entity, None, self.a_back, self.a_fwd):
             m.addSeparator() if a is None else m.addAction(a)
         self.graph_menu = mb.addMenu("&Graphs")
-        self.graph_menu.aboutToShow.connect(self._fill_graph_menu)
+        self.graph_menu.aboutToShow.connect(lambda: self._fill_graph_menu(self.graph_menu))
         m = mb.addMenu("&Metrics")
         for a in (self.a_metrics, self.a_treemap, self.a_dsm, None, self.a_export_metrics):
             m.addSeparator() if a is None else m.addAction(a)
@@ -223,42 +323,76 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         for d in (self.dock_project, self.dock_entities, self.dock_info, self.dock_find):
             m.addAction(d.toggleViewAction())
+        m.addSeparator()
+        m.addAction("Reset Layout", self.reset_layout)
         m = mb.addMenu("&Help")
         m.addAction(self.a_docs)
         m.addAction(self.a_about)
-        self.a_dark.setChecked(theme.current["name"] == "dark")
+        self.a_dark.setChecked(theme.is_dark())
 
     def _build_toolbar(self):
         tb = QToolBar("Main")
         tb.setObjectName("toolbar_main")
+        tb.setMovable(False)
+        tb.setIconSize(QSize(20, 20))
         self.addToolBar(tb)
-        for a in (self.a_new, self.a_open, self.a_save, None, self.a_analyze, None, self.a_back, self.a_fwd):
+        for a in (self.a_new, self.a_open, self.a_save, None, self.a_analyze, self.a_config, None,
+                  self.a_back, self.a_fwd, None):
             tb.addSeparator() if a is None else tb.addAction(a)
-        tb.addSeparator()
-        self.quick = QLineEdit(placeholderText="Find entity (Ctrl+E)…", clearButtonEnabled=True)
-        self.quick.setMaximumWidth(340)
+        self.quick = QLineEdit(placeholderText="Find entity\u2026   Ctrl+E", clearButtonEnabled=True)
+        self.quick.setMinimumWidth(240)
+        self.quick.setMaximumWidth(360)
+        self.quick_icon = self.quick.addAction(theme.icon("search"), QLineEdit.LeadingPosition)
+        self._themed.append((self.quick_icon, "search"))
         self.quick.returnPressed.connect(self._quick_find)
         tb.addWidget(self.quick)
+        tb.addAction(self.a_find)
         tb.addSeparator()
-        for text, fn in (("Metrics", self.a_metrics.trigger), ("Treemap", self.a_treemap.trigger),
-                         ("CodeCheck", self.a_codecheck.trigger), ("Architecture", self.a_arch.trigger)):
-            b = QPushButton(text)
-            b.setFlat(True)
-            b.clicked.connect(fn)
-            tb.addWidget(b)
-            setattr(self, f"btn_{text.lower()}", b)
+        self.graph_btn = QToolButton()
+        self.graph_btn.setIcon(theme.icon("graph"))
+        self.graph_btn.setToolTip("Graphs for the selected entity")
+        self.graph_btn.setPopupMode(QToolButton.InstantPopup)
+        gm = QMenu(self.graph_btn)
+        gm.aboutToShow.connect(lambda: self._fill_graph_menu(gm))
+        self.graph_btn.setMenu(gm)
+        self._themed.append((self.graph_btn, "graph"))
+        tb.addWidget(self.graph_btn)
+        for a in (self.a_arch, self.a_uml, None, self.a_metrics, self.a_treemap, self.a_dsm, None,
+                  self.a_codecheck, self.a_report):
+            tb.addSeparator() if a is None else tb.addAction(a)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer)
+        tb.addAction(self.a_dark)
 
     def _build_status(self):
         self.progress = QProgressBar()
-        self.progress.setMaximumWidth(260)
+        self.progress.setMaximumWidth(220)
+        self.progress.setMaximumHeight(14)
+        self.progress.setTextVisible(False)
         self.progress.hide()
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.hide()
         self.cancel_btn.clicked.connect(lambda: self.worker and self.worker.cancel())
         self.status_label = QLabel()
+        self.project_label = QLabel()
         self.statusBar().addWidget(self.status_label, 1)
         self.statusBar().addPermanentWidget(self.progress)
         self.statusBar().addPermanentWidget(self.cancel_btn)
+        self.statusBar().addPermanentWidget(self.project_label)
+
+    def reset_layout(self):
+        for d, area in ((self.dock_project, Qt.LeftDockWidgetArea), (self.dock_info, Qt.RightDockWidgetArea),
+                        (self.dock_find, Qt.BottomDockWidgetArea)):
+            d.setFloating(False)
+            self.addDockWidget(area, d)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_entities)
+        self.tabifyDockWidget(self.dock_project, self.dock_entities)
+        for d in (self.dock_project, self.dock_entities, self.dock_info):
+            d.show()
+        self.dock_find.hide()
+        self.dock_project.raise_()
+        self.resizeDocks([self.dock_project, self.dock_info], [300, 360], Qt.Horizontal)
 
     def _update_actions(self):
         has = self.db is not None
@@ -267,11 +401,12 @@ class MainWindow(QMainWindow):
                   self.a_metrics, self.a_treemap, self.a_dsm, self.a_export_metrics, self.a_arch, self.a_uml,
                   self.a_codecheck, self.a_report, self.a_find_entity):
             a.setEnabled(has and not (busy and a in (self.a_analyze, self.a_full, self.a_config)))
-        for b in (self.btn_metrics, self.btn_treemap, self.btn_codecheck, self.btn_architecture):
-            b.setEnabled(has)
+        self.graph_btn.setEnabled(has)
         self.quick.setEnabled(has)
         self.a_new.setEnabled(not busy)
         self.a_open.setEnabled(not busy)
+        self.project_label.setText(f"{self.db.config().get('name')}  \u00b7  {os.path.basename(self.db.path)}"
+                                   if has else "")
 
     # ---- project lifecycle --------------------------------------------------------------------------
     def recent_projects(self):
@@ -356,7 +491,7 @@ class MainWindow(QMainWindow):
         for w in (self.project_tree, self.entity_filter, self.info, self.find_panel):
             w.set_db(None)
         self.welcome.refresh()
-        self.tabs.addTab(self.welcome, "Welcome")
+        self.tabs.addTab(self.welcome, app_icon(), "Start Page")
         self.setWindowTitle(APP_NAME)
         self._update_actions()
 
@@ -458,7 +593,7 @@ class MainWindow(QMainWindow):
         self.run_task("Analyzing…", job, done)
 
     # ---- tabs -------------------------------------------------------------------------------------------
-    def add_tab(self, w, title=None, connect=False):
+    def add_tab(self, w, title=None, connect=False, icon=None):
         if self.welcome is not None and self.tabs.indexOf(self.welcome) >= 0 and self.db is not None:
             self.tabs.removeTab(self.tabs.indexOf(self.welcome))
         if connect:
@@ -466,7 +601,13 @@ class MainWindow(QMainWindow):
                               ("locationActivated", self.open_location)):
                 if hasattr(w, sig):
                     getattr(w, sig).connect(slot)
-        idx = self.tabs.addTab(w, title or getattr(w, "title", "View"))
+        if isinstance(icon, str):
+            w.setProperty("iconName", icon)
+            icon = theme.icon(icon)
+        if icon is not None:
+            idx = self.tabs.addTab(w, icon, title or getattr(w, "title", "View"))
+        else:
+            idx = self.tabs.addTab(w, title or getattr(w, "title", "View"))
         self.tabs.setTabToolTip(idx, title or getattr(w, "title", ""))
         self.tabs.setCurrentIndex(idx)
         return idx
@@ -512,7 +653,7 @@ class MainWindow(QMainWindow):
                 self.tabs.setCurrentIndex(i)
                 self.tabs.widget(i).refresh()
                 return
-        self.add_tab(ProjectSummary(self.db), connect=True)
+        self.add_tab(ProjectSummary(self.db), connect=True, icon="info")
 
     # ---- navigation --------------------------------------------------------------------------------------
     def editor_for(self, file_id, create=True):
@@ -532,7 +673,7 @@ class MainWindow(QMainWindow):
         ed.entityJump.connect(self._editor_jump)
         ed.contextRequested.connect(self._editor_menu)
         ed.modifiedChanged.connect(lambda mod, p=pane: self._mark_modified(p, mod))
-        idx = self.add_tab(pane, pane.title)
+        idx = self.add_tab(pane, pane.title, icon=kind_icon(M.FILE))
         self.tabs.setTabToolTip(idx, f.path)
         return idx, pane
 
@@ -678,9 +819,10 @@ class MainWindow(QMainWindow):
             m.addAction(f"Go to Declaration ({self.db.location(d)})",
                         lambda d=d: self.open_location(d.file_id, d.line, d.col))
         m.addSeparator()
-        g = m.addMenu("Graphs")
+        g = m.addMenu(theme.icon("graph"), "Graphs")
         for kind in graphs_for(e):
-            g.addAction(GRAPH_TYPES[kind], lambda k=kind: self.open_graph(k, e.id))
+            g.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
+                        lambda k=kind: self.open_graph(k, e.id))
         m.addSeparator()
         m.addAction("Find in Files", lambda: self.find_in_files(e.name))
         m.addAction("Copy Qualified Name", lambda: QApplication.clipboard().setText(e.longname))
@@ -699,17 +841,22 @@ class MainWindow(QMainWindow):
         e = self.db.entity(self.current_entity)
         m = QMenu(self)
         for kind in graphs_for(e):
-            m.addAction(GRAPH_TYPES[kind], lambda k=kind: self.open_graph(k, e.id))
+            m.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
+                        lambda k=kind: self.open_graph(k, e.id))
         m.exec(self.info_graph_btn.mapToGlobal(self.info_graph_btn.rect().bottomLeft()))
 
-    def _fill_graph_menu(self):
-        m = self.graph_menu
+    GRAPH_ICONS = {"calls": "calls", "callby": "calls", "butterfly": "graph", "control": "flow",
+                   "inheritance": "architecture", "uml": "uml", "includes": "graph", "includedby": "graph",
+                   "filedeps": "graph"}
+
+    def _fill_graph_menu(self, m):
         m.clear()
         e = self.db.entity(self.current_entity) if (self.db and self.current_entity) else None
         if e is not None:
             m.addSection(f"{e.name}")
             for kind in graphs_for(e):
-                m.addAction(GRAPH_TYPES[kind], lambda k=kind: self.open_graph(k, e.id))
+                m.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
+                            lambda k=kind: self.open_graph(k, e.id))
             m.addSeparator()
         else:
             a = m.addAction("(select an entity for entity graphs)")
@@ -729,7 +876,7 @@ class MainWindow(QMainWindow):
         panel.entityClicked.connect(self.show_entity)
         panel.entityActivated.connect(self.activate_entity)
         panel.lineActivated.connect(lambda fid, line: self.open_location(fid, line))
-        self.add_tab(panel, panel.title)
+        self.add_tab(panel, panel.title, icon=self.GRAPH_ICONS.get(kind, "architecture" if kind == "architecture" else "graph"))
 
     def _quick_find(self):
         text = self.quick.text().strip()
@@ -777,7 +924,7 @@ class MainWindow(QMainWindow):
         panel = CodeCheckPanel(self.db)
         panel.locationActivated.connect(self.open_location)
         panel.runRequested.connect(lambda en, thr, p=panel: self._run_codecheck(p, en, thr))
-        self.add_tab(panel)
+        self.add_tab(panel, icon="check")
 
     def _run_codecheck(self, panel, enabled, thresholds):
         path = self.db.path
@@ -818,6 +965,14 @@ class MainWindow(QMainWindow):
         name = "dark" if self.a_dark.isChecked() else "light"
         theme.apply_theme(QApplication.instance(), name)
         self.settings.setValue("theme", name)
+        for obj, icon_name in self._themed:
+            obj.setIcon(theme.icon(icon_name))
+        for i in range(self.tabs.count()):
+            nm = self.tabs.widget(i).property("iconName")
+            if nm:
+                self.tabs.setTabIcon(i, theme.icon(nm))
+        self.welcome.refresh()
+        self.info.refresh_theme()
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if isinstance(w, EditorPane):
@@ -877,7 +1032,7 @@ class MainWindow(QMainWindow):
             e.ignore()
             return
         self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("windowState", self.saveState())
+        self.settings.setValue(self.STATE_KEY, self.saveState())
         if self.db is not None:
             self.db.close()
         super().closeEvent(e)

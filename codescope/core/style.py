@@ -61,3 +61,21 @@ def node_style(kind: str):
     if kind == "dir":
         return ("#eef3e6", "#6b8e23", "note")
     return KIND_STYLE.get(kind, ("#f4f4f4", "#888888", "rect"))
+
+
+def _mix(a: str, b: str, t: float) -> str:
+    """Blend colour *a* into *b* by factor *t* (0 = b, 1 = a)."""
+    a, b = a.lstrip("#"), b.lstrip("#")
+    ca = [int(a[i:i + 2], 16) for i in (0, 2, 4)]
+    cb = [int(b[i:i + 2], 16) for i in (0, 2, 4)]
+    return "#" + "".join(f"{round(x * t + y * (1 - t)):02x}" for x, y in zip(ca, cb))
+
+
+def node_style_dark(kind: str, bg: str = "#1e1f22"):
+    """Dark-theme variant: tinted fills with bright borders, keeping each kind's hue."""
+    fill, border, shape = node_style(kind)
+    if kind in ("cfg:start", "cfg:end"):
+        return fill, border, shape
+    if shape == "dashed":
+        return "#26282c", "#6e7681", shape
+    return _mix(border, bg, 0.17), _mix(border, "#ffffff", 0.7), shape
