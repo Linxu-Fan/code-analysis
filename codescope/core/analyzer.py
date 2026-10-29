@@ -94,8 +94,10 @@ def file_digest(path):
 
 def scan_sources(cfg: dict):
     """Yield (abs path, language) for every analyzable file under the project roots."""
+    from .folders import matches, may_contain
     langs = set(cfg.get("languages") or [])
     excludes = cfg.get("exclude") or []
+    selection = cfg.get("folders") or []
     found = []
     for root in cfg.get("roots", []):
         root = os.path.abspath(root)
@@ -110,10 +112,14 @@ def scan_sources(cfg: dict):
                 if d.startswith(".") or any(fnmatch.fnmatch(probe, pat) or fnmatch.fnmatch(probe + "x", pat)
                                             for pat in excludes):
                     continue
+                if not may_contain(os.path.join(dirpath, d), selection):
+                    continue
                 keep.append(d)
             dirnames[:] = sorted(keep)
             for f in sorted(filenames):
-                found.append(os.path.join(dirpath, f))
+                full = os.path.join(dirpath, f)
+                if matches(full, selection):
+                    found.append(full)
     header = cfg.get("header_lang", "auto")
     if header == "auto":
         has_cpp = any(language_for_path(p, langs) == "cpp" and not p.lower().endswith(".h") for p in found)

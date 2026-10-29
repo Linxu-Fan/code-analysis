@@ -71,3 +71,53 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert main(["report", db, "-o", str(tmp_path / "r"), "-q"]) == 0
     assert main(["analyze", db, "-q"]) == 0
     assert "0 parsed" in capsys.readouterr().out
+
+
+def _make_tree(tmp_path):
+    root = tmp_path / "proj"
+    for d in ("src/core", "include", "third_party/zlib", "build/gen", "docs"):
+        (root / d).mkdir(parents=True)
+    (root / "src" / "main.cpp").write_text("int main() { return helper(); }\n")
+    (root / "src" / "core" / "helper.cpp").write_text('#include "api.h"\nint helper() { return 1; }\n')
+    (root / "include" / "api.h").write_text("int helper();\n")
+    (root / "third_party" / "zlib" / "zlib.c").write_text("int inflate(void) { return 0; }\n")
+    (root / "build" / "gen" / "gen.cpp").write_text("int generated() { return 0; }\n")
+    (root / "docs" / "notes.txt").write_text("not code\n")
+    (root / "setup.py").write_text("print('x')\n")
+    return root
+
+
+def test_folder_scan_and_default_selection(tmp_path):
+    from codescope.core.folders import default_selection, matches, norm, scan_tree
+    root = _make_tree(tmp_path)
+    tree = scan_tree(str(root))
+    names = {c.name: c for c in tree.children}
+    assert names["src"].total == 2 and names["include"].total == 1 and names["docs"].total == 0
+    assert names["third_party"].third_party and names["build"].third_party
+    sel = default_selection(tree)
+    paths = {(s["path"], s["recursive"]) for s in sel}
+    assert (norm(root / "src"), True) in paths and (norm(root / "include"), True) in paths
+    assert (norm(root), False) in paths                       # setup.py at the top level
+    assert not matches(str(root / "third_party" / "zlib" / "zlib.c"), sel)
+    assert matches(str(root / "src" / "core" / "helper.cpp"), sel)
+    assert matches(str(root / "setup.py"), sel)
+
+
+def test_analysis_limited_to_selected_folders(tmp_path, capsys):
+    from codescope.core.database import Database
+    root = _make_tree(tmp_path)
+    db_path = str(tmp_path / "f.csdb")
+    assert main(["create", db_path, "-r", str(root), "-f", "src", "-f", "include", "-a"]) == 0
+    db = Database(db_path)
+    rels = sorted(f.relpath for f in db.files())
+    assert rels == ["include/api.h", "src/core/helper.cpp", "src/main.cpp"]
+    main_fn = next(e for e in db.entities(name="main"))
+    assert {x.name for x in db.related(main_fn.id, ("Call",))} == {"helper"}
+    db.close()
+    capsys.readouterr()
+    assert main(["settings", db_path, "--own-code"]) == 0
+    assert main(["analyze", db_path, "-q"]) == 0
+    db = Database(db_path)
+    rels = sorted(f.relpath for f in db.files())
+    assert "setup.py" in rels and not any(r.startswith(("third_party", "build")) for r in rels)
+    db.close()

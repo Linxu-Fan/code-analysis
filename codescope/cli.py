@@ -67,15 +67,40 @@ def cmd_create(a):
         if l not in SELECTABLE:
             sys.exit(f"error: unsupported language '{l}' (choose from {', '.join(SELECTABLE)})")
     db = create_project(a.db, a.name or os.path.splitext(os.path.basename(a.db))[0], a.root, langs, None)
+    cfg = db.config()
     if a.exclude:
-        cfg = db.config()
         cfg["exclude"] = cfg["exclude"] + a.exclude
-        db.set_config(cfg)
+    try:
+        cfg["folders"] = _folder_selection(cfg, a.folder, a.own_code)
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
+    db.set_config(cfg)
+    if cfg["folders"]:
+        from .core.folders import describe
+        print("Analyzing folders: " + describe(cfg["folders"], cfg["roots"]))
     print(f"Created {db.path}")
     if a.analyze:
         a.full = False
         a.quiet = False
         return cmd_analyze(a)
+
+
+def _folder_selection(cfg, folders, own_code):
+    """Folder selection from --folder (relative to a project folder or absolute) and --own-code."""
+    from .core.folders import default_selection, norm, scan_tree
+    sel = []
+    for f in folders or []:
+        cands = [f] if os.path.isabs(f) else [os.path.join(r, f) for r in cfg["roots"]]
+        hit = next((c for c in cands if os.path.isdir(c)), None)
+        if hit is None:
+            raise ValueError(f"folder not found in the project: {f}")
+        sel.append({"path": norm(hit), "recursive": True})
+    if own_code:
+        for r in cfg["roots"]:
+            tree = scan_tree(r, cfg.get("languages"), cfg.get("exclude") or [])
+            sel += [s for s in default_selection(tree)
+                    if not folders or any(s["path"].startswith(x["path"]) for x in sel)]
+    return sel
 
 
 def cmd_add(a):
@@ -110,6 +135,12 @@ def cmd_settings(a):
         changed = True
     if a.header_lang:
         cfg["header_lang"] = a.header_lang
+        changed = True
+    if a.folder is not None or a.all_folders or a.own_code:
+        try:
+            cfg["folders"] = [] if a.all_folders else _folder_selection(cfg, a.folder, a.own_code)
+        except ValueError as exc:
+            sys.exit(f"error: {exc}")
         changed = True
     if changed:
         db.set_config(cfg)
@@ -273,6 +304,10 @@ def build_parser():
     s.add_argument("-n", "--name")
     s.add_argument("-l", "--lang", nargs="+", help=f"languages: {' '.join(SELECTABLE)}")
     s.add_argument("-x", "--exclude", action="append", help="exclude glob, e.g. */third_party/*")
+    s.add_argument("-f", "--folder", action="append",
+                   help="only analyze this sub folder (repeatable, relative to the project folder), e.g. -f src -f include")
+    s.add_argument("--own-code", action="store_true",
+                   help="skip folders that look like third-party code or build output (third_party, external, ...)")
     s.add_argument("-a", "--analyze", action="store_true", help="analyze immediately")
     s.set_defaults(fn=cmd_create)
 
@@ -291,6 +326,9 @@ def build_parser():
     s.add_argument("--languages", nargs="+")
     s.add_argument("--exclude", nargs="+")
     s.add_argument("--header-lang", choices=["auto", "c", "cpp"])
+    s.add_argument("-f", "--folder", action="append", help="replace the folder selection (repeatable)")
+    s.add_argument("--own-code", action="store_true", help="select own-code folders automatically")
+    s.add_argument("--all-folders", action="store_true", help="analyze all folders again")
     s.set_defaults(fn=cmd_settings)
 
     s = sub.add_parser("analyze", help="analyze changed files (or everything with --full)")

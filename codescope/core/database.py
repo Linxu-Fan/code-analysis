@@ -103,6 +103,7 @@ DEFAULT_CONFIG = {
     "languages": ["c", "cpp", "python"],
     "header_lang": "auto",
     "ignore_macros": [],
+    "folders": [],
     "workers": 0,
     "codecheck": {},
 }

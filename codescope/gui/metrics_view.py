@@ -264,7 +264,9 @@ class ProjectSummary(QScrollArea):
         pm = db.project_metrics()
         cfg = db.config()
         self.name.setText(cfg.get("name", "Project"))
-        self.sub.setText(f"{db.path}   \u00b7   analyzed {db.get_meta('analyzed_at', 'never')}")
+        from ..core.folders import describe
+        self.sub.setText(f"{db.path}   \u00b7   analyzed {db.get_meta('analyzed_at', 'never')}   \u00b7   "
+                         f"folders: {describe(cfg.get('folders'), cfg.get('roots', []))}")
         for key, lbl in self.values.items():
             v = pm.get(key, 0)
             lbl.setText(f"{v:,}" if isinstance(v, int) else fmt_value(v))

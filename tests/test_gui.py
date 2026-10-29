@@ -84,3 +84,32 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     win.close_project()
     assert win.db is None
     win.close()
+
+
+def test_project_dialog_folder_picker(app, tmp_path):
+    from PySide6.QtCore import Qt
+    from codescope.core.folders import norm
+    from codescope.gui.panels import ProjectDialog
+
+    from .test_tools import _make_tree
+    root = _make_tree(tmp_path)
+    dlg = ProjectDialog(None, {"name": "p", "roots": [str(root)]}, str(tmp_path / "p.csdb"), new=True)
+    picker = dlg.picker
+    top = picker.tree.topLevelItem(0)
+    names = {top.child(i).text(0).split()[0]: top.child(i) for i in range(top.childCount())}
+    assert {"src", "include", "third_party", "build"} <= set(names) and "docs" not in names
+    # existing project without a saved selection: everything selected
+    assert picker.selection() == [] and picker.selected_files() == picker.total_files() == 6
+    picker.select_own()
+    assert names["third_party"].checkState(0) == Qt.Unchecked
+    assert names["src"].checkState(0) == Qt.Checked
+    picker._set_all(Qt.Unchecked)
+    names["src"].setCheckState(0, Qt.Checked)
+    names["include"].setCheckState(0, Qt.Checked)
+    sel = dlg.result_config()["folders"]
+    assert sel == [{"path": norm(root / "include"), "recursive": True},
+                   {"path": norm(root / "src"), "recursive": True}]
+    assert picker.selected_files() == 3
+    # reopening restores the ticks
+    dlg2 = ProjectDialog(None, {"name": "p", "roots": [str(root)], "folders": sel}, None, new=False)
+    assert dlg2.picker.selection() == sel

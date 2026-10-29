@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSplitter,
+                               QLabel, QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSizePolicy, QSplitter,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from ..core.codecheck import DEFAULT_ENABLED, RULES, rule_settings
@@ -268,34 +268,225 @@ class FindInFiles(QWidget):
             self.locationActivated.emit(*data)
 
 
+class FolderPicker(QWidget):
+    """Checkable tree of a project's folders with analyzable-file counts."""
+    changed = Signal()
+
+    FILES_ROLE = Qt.UserRole + 1      # True for the "(files in this folder)" pseudo item
+    PATH_ROLE = Qt.UserRole
+    COUNT_ROLE = Qt.UserRole + 2
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels(["Folder", "Files"])
+        self.tree.setUniformRowHeights(True)
+        self.tree.header().setStretchLastSection(False)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.tree.header().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.summary = QLabel(objectName="Muted")
+        own = QPushButton("Own Code Only")
+        own.setToolTip("Select everything except folders that look like third-party code or build output\n"
+                       "(third_party, external, vendor, deps, build, ...)")
+        all_b = QPushButton("All")
+        none_b = QPushButton("None")
+        self.rescan_b = QPushButton("Rescan")
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        for b in (own, all_b, none_b):
+            bar.addWidget(b)
+        bar.addStretch(1)
+        bar.addWidget(self.rescan_b)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        hint = QLabel("Tick the folders that contain your own code, e.g. <b>src</b> and <b>include</b>. "
+                      "Unticked folders are not analyzed.")
+        hint.setWordWrap(True)
+        hint.setObjectName("Muted")
+        v.addWidget(hint)
+        v.addLayout(bar)
+        v.addWidget(self.tree, 1)
+        v.addWidget(self.summary)
+        self.trees = []
+        self._updating = False
+        own.clicked.connect(self.select_own)
+        all_b.clicked.connect(lambda: self._set_all(Qt.Checked))
+        none_b.clicked.connect(lambda: self._set_all(Qt.Unchecked))
+        self.tree.itemChanged.connect(self._item_changed)
+
+    # ---- building -----------------------------------------------------------------------------
+    def load(self, roots, languages, excludes, selection=None):
+        """Scan *roots* and show them; *selection* None = own-code default."""
+        from PySide6.QtWidgets import QApplication
+
+        from ..core.folders import default_selection, scan_tree
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.trees = [scan_tree(r, languages, excludes) for r in roots if os.path.isdir(r)]
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._updating = True
+        self.tree.clear()
+        for t in self.trees:
+            self._add(self.tree.invisibleRootItem(), t, top=True)
+        self._updating = False
+        if selection is None:
+            selection = [s for t in self.trees for s in default_selection(t)]
+        self.apply(selection or [{"path": t.path, "recursive": True} for t in self.trees])
+        for i in range(self.tree.topLevelItemCount()):
+            self.tree.topLevelItem(i).setExpanded(True)
+
+    def _add(self, parent, node, top=False):
+        from ..gui import theme
+        if node.total == 0 and not top:
+            return
+        it = QTreeWidgetItem(parent, [node.name, f"{node.total:,}"])
+        if top:
+            it.setToolTip(0, node.path)
+            f = it.font(0)
+            f.setBold(True)
+            it.setFont(0, f)
+        it.setData(0, self.PATH_ROLE, node.path)
+        it.setData(0, self.COUNT_ROLE, node.total)
+        it.setFlags(it.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsAutoTristate)
+        it.setCheckState(0, Qt.Unchecked)
+        it.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+        it.setIcon(0, self.style().standardIcon(self.style().StandardPixmap.SP_DirIcon))
+        if node.third_party:
+            it.setText(0, f"{node.name}   (third-party?)")
+            it.setForeground(0, QColor(theme.tokens()["muted"]))
+            it.setToolTip(0, "This looks like third-party code or build output")
+        kids = [c for c in node.children if c.total]
+        if node.files and kids:
+            f = QTreeWidgetItem(it, ["(files in this folder)", f"{node.files:,}"])
+            f.setData(0, self.PATH_ROLE, node.path)
+            f.setData(0, self.FILES_ROLE, True)
+            f.setData(0, self.COUNT_ROLE, node.files)
+            f.setFlags(f.flags() | Qt.ItemIsUserCheckable)
+            f.setCheckState(0, Qt.Unchecked)
+            f.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
+            f.setForeground(0, QColor(theme.tokens()["muted"]))
+        for c in kids:
+            self._add(it, c)
+
+    def _leaves(self, item=None):
+        item = item or self.tree.invisibleRootItem()
+        for i in range(item.childCount()):
+            c = item.child(i)
+            if c.childCount():
+                yield from self._leaves(c)
+            else:
+                yield c
+
+    # ---- selection ------------------------------------------------------------------------------
+    def apply(self, selection):
+        from ..core.folders import norm
+        sel = [(norm(s["path"]), s.get("recursive", True)) for s in selection]
+
+        def covered(path, files_only):
+            for sp, rec in sel:
+                if rec and (path == sp or path.startswith(sp + "/")):
+                    return True
+                if files_only and not rec and path == sp:
+                    return True
+                if not files_only and not rec and path == sp and not self._has_children(path):
+                    return True
+            return False
+        self._updating = True
+        for leaf in self._leaves():
+            path = norm(leaf.data(0, self.PATH_ROLE))
+            ok = covered(path, bool(leaf.data(0, self.FILES_ROLE)))
+            leaf.setCheckState(0, Qt.Checked if ok else Qt.Unchecked)
+        self._updating = False
+        self._summary()
+
+    def _has_children(self, path):
+        return False
+
+    def selection(self):
+        """Minimal folder selection for the config; [] when everything is selected."""
+        out = []
+
+        def walk(item):
+            st = item.checkState(0)
+            if st == Qt.Unchecked:
+                return
+            if st == Qt.Checked:
+                out.append({"path": item.data(0, self.PATH_ROLE),
+                            "recursive": not bool(item.data(0, self.FILES_ROLE))})
+                return
+            for i in range(item.childCount()):
+                walk(item.child(i))
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            walk(root.child(i))
+        if all(root.child(i).checkState(0) == Qt.Checked for i in range(root.childCount())):
+            return []
+        return out
+
+    def selected_files(self):
+        return sum(leaf.data(0, self.COUNT_ROLE) or 0 for leaf in self._leaves()
+                   if leaf.checkState(0) == Qt.Checked)
+
+    def total_files(self):
+        return sum(t.total for t in self.trees)
+
+    def select_own(self):
+        from ..core.folders import default_selection
+        self.apply([s for t in self.trees for s in default_selection(t)])
+        self.changed.emit()
+
+    def _set_all(self, state):
+        self._updating = True
+        for leaf in self._leaves():
+            leaf.setCheckState(0, state)
+        self._updating = False
+        self._summary()
+        self.changed.emit()
+
+    def _item_changed(self, item, col):
+        if not self._updating and col == 0:
+            self._summary()
+            self.changed.emit()
+
+    def _summary(self):
+        if not self.trees:
+            self.summary.setText("Add a source directory to choose its folders.")
+            return
+        self.summary.setText(f"{self.selected_files():,} of {self.total_files():,} analyzable files selected")
+
+
 class ProjectDialog(QDialog):
     """New project / project configuration dialog."""
 
     def __init__(self, parent=None, cfg=None, db_path=None, new=True):
         super().__init__(parent)
         self.setWindowTitle("New Project" if new else "Configure Project")
-        self.resize(640, 520)
+        self.resize(1060, 660)
         cfg = cfg or {}
         self.new = new
         self.name = QLineEdit(cfg.get("name", ""))
         self.db_path = QLineEdit(db_path or "")
-        browse_db = QPushButton("Browse…")
+        browse_db = QPushButton("Browse\u2026")
         self.db_path.setEnabled(new)
         browse_db.setEnabled(new)
         dbrow = QHBoxLayout()
         dbrow.addWidget(self.db_path, 1)
         dbrow.addWidget(browse_db)
         self.roots = QListWidget()
+        self.roots.setFixedHeight(72)
+        self.roots.setToolTip("Top-level project folders; choose which sub folders to analyze on the right")
         for r in cfg.get("roots", []):
             self.roots.addItem(r)
-        add = QPushButton("Add Directory…")
+        add = QPushButton("Add Folder\u2026")
+        add.setProperty("primary", True)
         rem = QPushButton("Remove")
-        rb = QVBoxLayout()
+        rb = QHBoxLayout()
         rb.addWidget(add)
         rb.addWidget(rem)
         rb.addStretch(1)
-        rrow = QHBoxLayout()
-        rrow.addWidget(self.roots, 1)
+        rrow = QVBoxLayout()
+        rrow.addWidget(self.roots)
         rrow.addLayout(rb)
         langs = QGroupBox("Languages")
         lh = QHBoxLayout(langs)
@@ -319,25 +510,69 @@ class ProjectDialog(QDialog):
         form = QFormLayout()
         form.addRow("Project name:", self.name)
         form.addRow("Database file:", dbrow)
-        form.addRow("Source directories:", rrow)
+        form.addRow("Project folders:", rrow)
         form.addRow(langs)
         form.addRow(".h files parsed as:", self.header)
         form.addRow("Exclude patterns:", self.exclude)
+        langs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        left = QWidget()
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 8, 0)
+        lv.addLayout(form)
+        lv.addStretch(1)
+        self.picker = FolderPicker()
+        right = QGroupBox("Folders to analyze")
+        rv = QVBoxLayout(right)
+        rv.addWidget(self.picker)
+        split = QSplitter()
+        split.addWidget(left)
+        split.addWidget(right)
+        split.setSizes([500, 540])
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         v = QVBoxLayout(self)
-        v.addLayout(form)
+        v.addWidget(split, 1)
+        self.error = QLabel()
+        self.error.setStyleSheet("color:#c62828")
+        v.addWidget(self.error)
         v.addWidget(buttons)
         buttons.accepted.connect(self._accept)
         buttons.rejected.connect(self.reject)
         add.clicked.connect(self._add)
-        rem.clicked.connect(lambda: [self.roots.takeItem(self.roots.row(i)) for i in self.roots.selectedItems()])
+        rem.clicked.connect(self._remove)
         browse_db.clicked.connect(self._browse_db)
-        self.error = QLabel()
-        self.error.setStyleSheet("color:#c62828")
-        v.insertWidget(1, self.error)
+        self.picker.rescan_b.clicked.connect(lambda: self.rescan(keep=True))
+        for cb in self.lang_boxes.values():
+            cb.toggled.connect(lambda _: self.rescan(keep=True))
+        if self.roots.count():
+            saved = cfg.get("folders") or []
+            self.rescan(selection=saved if saved else [{"path": r, "recursive": True} for r in cfg.get("roots", [])])
+
+    def _languages(self):
+        return [k for k, cb in self.lang_boxes.items() if cb.isChecked()]
+
+    def _excludes(self):
+        return [l.strip() for l in self.exclude.toPlainText().splitlines() if l.strip()]
+
+    def _root_list(self):
+        return [self.roots.item(i).text() for i in range(self.roots.count())]
+
+    def rescan(self, keep=False, selection=None):
+        """Rescan the project folders; *keep* preserves the current ticks where possible."""
+        from ..core.folders import default_selection, norm, scan_tree
+        if keep:
+            selection = self.picker.selection() if self.picker.trees else None
+            if selection == [] and self.picker.trees:
+                selection = [{"path": t.path, "recursive": True} for t in self.picker.trees]
+            known = {t.path for t in self.picker.trees}
+            new_roots = [r for r in self._root_list() if norm(r) not in known]
+            if selection is not None and new_roots:
+                for r in new_roots:
+                    if os.path.isdir(r):
+                        selection += default_selection(scan_tree(r, self._languages(), self._excludes()))
+        self.picker.load(self._root_list(), self._languages(), self._excludes(), selection)
 
     def _add(self):
-        d = QFileDialog.getExistingDirectory(self, "Add Source Directory")
+        d = QFileDialog.getExistingDirectory(self, "Add Project Folder")
         if d:
             d = os.path.abspath(d)
             if not self.roots.findItems(d, Qt.MatchExactly):
@@ -346,6 +581,12 @@ class ProjectDialog(QDialog):
                 self.name.setText(os.path.basename(d))
             if not self.db_path.text():
                 self.db_path.setText(os.path.join(d, os.path.basename(d) + ".csdb"))
+            self.rescan(keep=True)
+
+    def _remove(self):
+        for i in self.roots.selectedItems():
+            self.roots.takeItem(self.roots.row(i))
+        self.rescan(keep=True)
 
     def _browse_db(self):
         p, _ = QFileDialog.getSaveFileName(self, "Project Database", self.db_path.text() or "project.csdb",
@@ -357,7 +598,7 @@ class ProjectDialog(QDialog):
 
     def _accept(self):
         if self.roots.count() == 0:
-            self.error.setText("Add at least one source directory.")
+            self.error.setText("Add at least one project folder.")
             return
         if self.new and not self.db_path.text().strip():
             self.error.setText("Choose where to store the project database.")
@@ -365,13 +606,17 @@ class ProjectDialog(QDialog):
         if not any(cb.isChecked() for cb in self.lang_boxes.values()):
             self.error.setText("Select at least one language.")
             return
+        if self.picker.trees and self.picker.selected_files() == 0:
+            self.error.setText("Select at least one folder to analyze.")
+            return
         self.accept()
 
     def result_config(self):
         return {
             "name": self.name.text().strip() or "Untitled",
-            "roots": [self.roots.item(i).text() for i in range(self.roots.count())],
-            "languages": [k for k, cb in self.lang_boxes.items() if cb.isChecked()],
+            "roots": self._root_list(),
+            "languages": self._languages(),
             "header_lang": self.header.currentData(),
-            "exclude": [l.strip() for l in self.exclude.toPlainText().splitlines() if l.strip()],
+            "exclude": self._excludes(),
+            "folders": self.picker.selection(),
         }

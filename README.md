@@ -93,8 +93,13 @@ python -m codescope
 
 ## Using the GUI
 
-1. **File → New Project…**: pick the source directories, the languages, how `.h` files are parsed,
-   and exclude patterns. The project is analyzed immediately.
+1. **File → New Project…**: click **Add Folder…** and pick your project folder. CodeScope scans
+   all of its subdirectories and shows them as a checkable tree with file counts under
+   **Folders to analyze**. Tick only the folders that contain your own code, e.g. `src` and `include`.
+   Folders that look like third-party code or build output (`third_party`, `external`, `vendor`,
+   `deps`, `build`, …) start unticked; **Own Code Only**, **All** and **None** reset the ticks.
+   Choose the languages and how `.h` files are parsed, then press OK and the project is analyzed.
+   You can change the folder selection later in **Project → Configure Project**.
 2. Browse with the **Project** tree (files and their outlines) or the **Entities** filter (by kind,
    with wildcard filtering). Select an entity to show it in the **Information** browser; double-click to open its source.
 3. In the editor, **Ctrl+click** or **F12** jumps to a definition and **Alt+Left/Right** navigates back
@@ -106,7 +111,9 @@ python -m codescope
 ## Command line
 
 ```text
-codescope create  proj.csdb -r src -r include [-l c cpp python] [-x "*/third_party/*"] [-a]
+codescope create  proj.csdb -r MyEngine -f src -f include [-l c cpp python] [-a]
+codescope create  proj.csdb -r MyEngine --own-code -a      (skip third_party/, build/, ...)
+codescope settings proj.csdb -f src -f include             (change the folder selection; --all-folders resets)
 codescope add     proj.csdb more_src/
 codescope analyze proj.csdb [--full]
 codescope list    proj.csdb -k class function [-n "geo::*"]
@@ -127,7 +134,8 @@ On Windows the console tool is called `codescope-cli.exe`.
 Settings are stored inside the project database and can be changed in **Project → Configure** or with
 `codescope settings`:
 
-* `roots`: source directories
+* `roots`: project folders
+* `folders`: the sub folders to analyze (empty means everything under `roots`)
 * `languages`: any of `c`, `cpp`, `python`
 * `exclude`: glob patterns matched against absolute paths (e.g. `*/build/*`)
 * `header_lang`: `auto`, `c` or `cpp` (how `.h` files are parsed)
