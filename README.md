@@ -40,18 +40,37 @@ Download either of these from the repository's **Releases** page, or from the ar
 Both contain `CodeScope.exe` (the GUI) and `codescope-cli.exe` (the console tool). No Python
 installation is needed.
 
-### Building the Windows package yourself
+### Building the Windows package yourself (one click)
 
-On a Windows machine with Python 3.10+ (and optionally [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
+1. Clone the repository on a Windows PC.
+2. Double-click **`build.bat`** in the repository root.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
-```
+The build takes a few minutes the first time and then opens the `dist` folder, which contains:
 
-This produces `dist\CodeScope\` (portable folder), the portable zip and, if Inno Setup is installed,
-the installer. The GitHub Actions workflow `.github/workflows/build.yml` does the same on every push:
-it runs the tests on Windows, builds with PyInstaller, smoke-tests the frozen executables, builds the
-installer and uploads both packages. Pushing a tag `v*` also publishes them as a GitHub release.
+* `dist\CodeScope\CodeScope.exe`: the application, ready to run
+* `dist\CodeScope-<version>-portable.zip`
+* `dist\CodeScope-<version>-Setup.exe`: the installer
+
+The script takes care of everything it needs:
+
+* It finds Python 3.10+. If none is installed, it offers to install it with `winget`.
+* It creates a private build environment in `.build-venv\`, so your global Python is untouched.
+* It installs the dependencies, runs the tests, builds with PyInstaller and smoke-tests the result.
+* It builds the installer with Inno Setup 6, offering to install Inno Setup via `winget` if it is missing.
+  Without Inno Setup you still get the portable folder and zip.
+
+Options can be given from a command prompt, e.g. `build.bat -SkipTests`:
+
+| Option | Effect |
+|--------|--------|
+| `-SkipTests` | Skip the test suite (faster) |
+| `-SkipInstaller` | Build only the portable folder and zip |
+| `-Clean` | Delete `.build-venv`, `build` and `dist` first |
+| `-Yes` | Accept the winget install prompts automatically |
+| `-NoPause` | Do not wait for a key press at the end (for scripts/CI) |
+
+The GitHub Actions workflow `.github/workflows/build.yml` runs `build.bat` on every push. It also builds
+and uploads the packages, and pushing a tag `v*` publishes them as a GitHub release.
 
 ## Running from source (any OS)
 

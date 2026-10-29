@@ -85,3 +85,24 @@ jobs:
           files: |
             dist/CodeScope-*-Setup.exe
             dist/CodeScope-*-portable.zip
+
+  one-click-build:
+    # Exercises build.bat exactly as a user would run it (minus the final key press).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run build.bat
+        shell: cmd
+        run: build.bat -NoPause
+      - name: Check outputs
+        shell: pwsh
+        run: |
+          $v = python -c "import codescope; print(codescope.__version__)"
+          foreach ($f in @("dist\CodeScope\CodeScope.exe", "dist\CodeScope\codescope-cli.exe",
+                           "dist\CodeScope-$v-portable.zip", "dist\CodeScope-$v-Setup.exe")) {
+            if (-not (Test-Path $f)) { throw "missing $f" }
+            Write-Host "ok $f"
+          }
