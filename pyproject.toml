@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codescope"
+dynamic = ["version"]
+description = "Static source code analysis and comprehension tool for C, C++ and Python"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6-Essentials>=6.6",
+    "tree-sitter>=0.23",
+    "tree-sitter-c>=0.23",
+    "tree-sitter-cpp>=0.23",
+    "tree-sitter-python>=0.23",
+    "pygments>=2.15",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pyinstaller>=6"]
+
+[project.scripts]
+codescope = "codescope.cli:main"
+
+[project.gui-scripts]
+codescope-gui = "codescope.gui.app:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "codescope.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["codescope*"]
+
+[tool.setuptools.package-data]
+codescope = ["resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

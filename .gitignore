@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.csdb
+*.csdb-wal
+*.csdb-shm
+*_report/
+.venv/
+venv/
