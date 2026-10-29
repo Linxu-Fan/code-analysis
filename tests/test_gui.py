@@ -113,3 +113,40 @@ def test_project_dialog_folder_picker(app, tmp_path):
     # reopening restores the ticks
     dlg2 = ProjectDialog(None, {"name": "p", "roots": [str(root)], "folders": sel}, None, new=False)
     assert dlg2.picker.selection() == sel
+
+
+def test_editor_visual_studio_highlighting(app, cpp_db):
+    from codescope.gui import theme
+    from codescope.gui.code_editor import EditorPane
+    theme.current["editor_scheme"] = "vs-light"
+    f = next(x for x in cpp_db.files() if x.relpath.endswith("main.cpp"))
+    pane = EditorPane(f.path, f.id, f.lang)
+    ed = pane.editor
+    rows = cpp_db.conn.execute("SELECT r.line, r.col, r.name, e.kind FROM refs r JOIN entities e ON e.id=r.dst_id "
+                               "WHERE r.file_id=?", (f.id,)).fetchall()
+    ed.set_semantic(rows, frozenset({"Shape", "Rect", "Circle"}), frozenset({"MAX_ITEMS"}))
+
+    def color_at(line, word):
+        blk = ed.document().findBlockByNumber(line - 1)
+        i = blk.text().index(word)
+        for r in blk.layout().formats():
+            if r.start <= i < r.start + r.length:
+                c = r.format.foreground().color().name()
+        return c
+
+    text = open(f.path).read().split("\n")
+    ln = next(i for i, l in enumerate(text, 1) if "static int classify" in l)
+    scheme = theme.CODE_SCHEMES["vs-light"]
+    assert color_at(ln, "static") == scheme["keyword"]
+    assert color_at(ln, "classify") == scheme["function"]
+    ln = next(i for i, l in enumerate(text, 1) if "new Rect" in l)
+    assert color_at(ln, "Rect") == scheme["type"]
+    ln = next(i for i, l in enumerate(text, 1) if "MAX_ITEMS" in l)
+    assert color_at(ln, "MAX_ITEMS") == scheme["macro"]
+    assert color_at(1, "#include") == scheme["preproc"]
+    assert color_at(1, "<iostream>") == scheme["string"]
+    assert ed.indent_unit() == 4
+    ed.zoom(2)
+    ed.zoom_reset()
+    pane.grab()
+    theme.current["editor_scheme"] = "auto"

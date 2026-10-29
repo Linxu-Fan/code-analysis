@@ -28,6 +28,14 @@ def main(argv=None):
     app.setOrganizationName("CodeScope")
     app.setWindowIcon(app_icon())
     settings = QSettings("CodeScope", "CodeScope")
+    theme.current["editor_scheme"] = settings.value("editorScheme", "auto")
+    font = settings.value("editorFont", "")
+    if font and "|" in font:
+        fam, size = font.rsplit("|", 1)
+        try:
+            theme.current["editor_font"] = (fam, float(size))
+        except ValueError:
+            pass
     theme.apply_theme(app, settings.value("theme", "dark"))
     win = MainWindow()
     win.show()

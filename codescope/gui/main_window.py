@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCompleter, QDockWidget, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSizePolicy, QTabWidget, QToolBar, QToolButton,
@@ -320,6 +320,20 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_report)
         m = mb.addMenu("&View")
         m.addAction(self.a_dark)
+        sm = m.addMenu("Editor Color Scheme")
+        self.scheme_actions = []
+        for key, label in (("auto", "Follow Application Theme"), ("vs-light", "Visual Studio Light"),
+                           ("vs-dark", "Visual Studio Dark")):
+            a = sm.addAction(label, lambda k=key: self.set_editor_scheme(k))
+            a.setCheckable(True)
+            a.setData(key)
+            a.setChecked(theme.current.get("editor_scheme", "auto") == key)
+            self.scheme_actions.append(a)
+        m.addAction("Editor Font\u2026", self.choose_editor_font)
+        zm = m.addMenu("Editor Zoom")
+        zm.addAction("Zoom In", lambda: self._editor_zoom(1), QKeySequence.ZoomIn)
+        zm.addAction("Zoom Out", lambda: self._editor_zoom(-1), QKeySequence.ZoomOut)
+        zm.addAction("Reset Zoom", lambda: self._editor_zoom(0), QKeySequence("Ctrl+0"))
         m.addSeparator()
         for d in (self.dock_project, self.dock_entities, self.dock_info, self.dock_find):
             m.addAction(d.toggleViewAction())
@@ -507,6 +521,9 @@ class MainWindow(QMainWindow):
     def reload_views(self):
         db = self.db
         db.invalidate()
+        for ed in self._editors():
+            if not ed.document().isModified():
+                ed.set_semantic(self._semantic_tokens(ed.file_id), *self._type_names(refresh=True))
         self.project_tree.set_db(db)
         self.entity_filter.set_db(db)
         names = sorted({e.longname for e in db.entities(include_locals=False) if not e.is_unresolved})
@@ -673,9 +690,65 @@ class MainWindow(QMainWindow):
         ed.entityJump.connect(self._editor_jump)
         ed.contextRequested.connect(self._editor_menu)
         ed.modifiedChanged.connect(lambda mod, p=pane: self._mark_modified(p, mod))
+        ed.set_semantic(self._semantic_tokens(file_id), *self._type_names())
         idx = self.add_tab(pane, pane.title, icon=kind_icon(M.FILE))
         self.tabs.setTabToolTip(idx, f.path)
         return idx, pane
+
+    def _semantic_tokens(self, file_id):
+        """(line, col, name, kind) for every resolved reference and declaration in a file."""
+        rows = self.db.conn.execute(
+            "SELECT r.line, r.col, r.name, e.kind FROM refs r JOIN entities e ON e.id = r.dst_id "
+            "WHERE r.file_id=? AND r.kind NOT IN ('Include', 'Import') "
+            "UNION ALL SELECT line, col, name, kind FROM entities WHERE file_id=? AND kind != 'File'",
+            (file_id, file_id)).fetchall()
+        return rows
+
+    def _type_names(self, refresh=False):
+        """(type names, macro names) of the project: colour Foo:: scopes as types and macros purple."""
+        if refresh or getattr(self, "_type_name_cache", None) is None or self._type_name_db is not self.db:
+            kinds = sorted(M.CLASS_KINDS | {M.TYPEDEF, M.UNRESOLVED_TYPE})
+            rows = self.db.conn.execute("SELECT DISTINCT name FROM entities WHERE kind IN (%s)" %
+                                        ",".join("?" * len(kinds)), kinds).fetchall()
+            macros = self.db.conn.execute("SELECT DISTINCT name FROM entities WHERE kind=?", (M.MACRO,)).fetchall()
+            self._type_name_cache = (frozenset(r[0] for r in rows), frozenset(r[0] for r in macros))
+            self._type_name_db = self.db
+        return self._type_name_cache
+
+    def _editors(self):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, EditorPane):
+                yield w.editor
+
+    def set_editor_scheme(self, name):
+        theme.current["editor_scheme"] = name
+        self.settings.setValue("editorScheme", name)
+        for a in self.scheme_actions:
+            a.setChecked(a.data() == name)
+        for ed in self._editors():
+            ed.apply_theme()
+
+    def choose_editor_font(self):
+        from PySide6.QtWidgets import QFontDialog
+        from .code_editor import mono_font
+        ok, font = QFontDialog.getFont(mono_font(), self, "Editor Font",
+                                       QFontDialog.MonospacedFonts)
+        if isinstance(ok, QFont):          # PySide returns (font, ok) or (ok, font) depending on version
+            ok, font = font, ok
+        if ok:
+            theme.current["editor_font"] = (font.family(), font.pointSizeF())
+            self.settings.setValue("editorFont", f"{font.family()}|{font.pointSizeF()}")
+            for ed in self._editors():
+                ed.set_editor_font(mono_font())
+
+    def _editor_zoom(self, delta):
+        w = self.tabs.currentWidget()
+        if isinstance(w, EditorPane):
+            if delta:
+                w.editor.zoom(delta)
+            else:
+                w.editor.zoom_reset()
 
     def _mark_modified(self, pane, mod):
         i = self.tabs.indexOf(pane)

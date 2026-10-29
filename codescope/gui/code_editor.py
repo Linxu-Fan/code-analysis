@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QKeySequence, QPainter, QShortcut,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QKeySequence, QPainter, QPen, QShortcut,
                            QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLineEdit, QMenu, QPlainTextEdit, QTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
@@ -14,15 +14,29 @@ from ..core.languages import LANGUAGES
 from . import theme
 
 
-def mono_font(size=10):
+EDITOR_FONTS = ("Cascadia Mono", "Consolas", "Cascadia Code", "JetBrains Mono", "Menlo", "DejaVu Sans Mono")
+
+
+def mono_font(size=None):
+    """Editor font: the user's choice, else Visual Studio's default (Cascadia Mono / Consolas, 10 pt)."""
+    family, psize = theme.current.get("editor_font") or (None, None)
     f = QFontDatabase.systemFont(QFontDatabase.FixedFont)
-    for fam in ("Cascadia Mono", "Consolas", "JetBrains Mono", "DejaVu Sans Mono", "Menlo"):
-        if fam in QFontDatabase.families():
+    families = QFontDatabase.families()
+    for fam in ((family,) if family else ()) + EDITOR_FONTS:
+        if fam and fam in families:
             f = QFont(fam)
             break
-    f.setPointSize(size)
+    f.setPointSizeF(float(size or psize or 10))
     f.setStyleHint(QFont.Monospace)
+    f.setFixedPitch(True)
     f.setStyleStrategy(QFont.PreferAntialias)
+    f.setHintingPreference(QFont.PreferFullHinting)
+    if hasattr(f, "setFeature"):          # Qt >= 6.7: no programming ligatures, like Visual Studio
+        for tag in ("liga", "calt", "dlig"):
+            try:
+                f.setFeature(QFont.Tag(tag) if hasattr(QFont, "Tag") else tag, 0)
+            except (TypeError, ValueError):
+                pass
     return f
 
 
@@ -45,14 +59,13 @@ class PygmentsHighlighter(QSyntaxHighlighter):
     def _build_formats(self):
         th = theme.code_theme()
         self.formats.clear()
-        for key, color in th.items():
-            if key[0].isupper():
+        mapping = {"Keyword": th["keyword"], "Keyword.Type": th["keyword"], "Name.Function": th["function"],
+                   "Name.Class": th["type"], "String": th["string"], "Number": th["number"],
+                   "Comment": th["comment"], "Comment.Preproc": th["preproc"], "Name.Decorator": th["macro"]}
+        for key, color in mapping.items():
+            if True:
                 f = QTextCharFormat()
                 f.setForeground(QColor(color))
-                if key == "Comment":
-                    f.setFontItalic(True)
-                if key in ("Keyword", "Name.Class"):
-                    f.setFontWeight(QFont.DemiBold)
                 self.formats[key] = f
 
     def _fmt(self, ttype):
@@ -123,11 +136,15 @@ class CodeEditor(QPlainTextEdit):
         self._occurrences = []
         self._mark_line = None
         self.load()
-        lexer = LANGUAGES[lang].lexer if lang in LANGUAGES else "text"
-        self.highlighter = PygmentsHighlighter(self.document(), lexer)
-        self._relex_timer = QTimer(self, singleShot=True, interval=400, timeout=self.highlighter.relex)
+        if lang in LANGUAGES:
+            from .highlight import TreeSitterHighlighter
+            self.highlighter = TreeSitterHighlighter(self.document(), lang)
+        else:
+            self.highlighter = PygmentsHighlighter(self.document(), "text")
+        self._relex_timer = QTimer(self, singleShot=True, interval=300, timeout=self.highlighter.relex)
         self.textChanged.connect(self._relex_timer.start)
         self.document().modificationChanged.connect(self.modifiedChanged)
+        self.document().modificationChanged.connect(self._modified)
         self._update_width()
         self.apply_theme()
         self.setMouseTracking(True)
@@ -147,14 +164,119 @@ class CodeEditor(QPlainTextEdit):
             fh.write(self.toPlainText())
         self.document().setModified(False)
 
+    def indent_unit(self):
+        """Indentation step used by this file (2, 3, 4 or 8 columns; tabs count as 4)."""
+        unit = getattr(self, "_indent_unit", None)
+        if unit is None:
+            counts = {}
+            for line in self.toPlainText().split("\n")[:4000]:
+                stripped = line.lstrip(" ")
+                n = len(line) - len(stripped)
+                if n and stripped and not stripped.startswith(("*", "\t")):
+                    counts[n] = counts.get(n, 0) + 1
+            unit = 4
+            if counts and not self.toPlainText().startswith("\t"):
+                for cand in (2, 3, 4, 8):
+                    total = sum(counts.values())
+                    ok = sum(c for n, c in counts.items() if n % cand == 0)
+                    if ok >= 0.9 * total:
+                        unit = cand
+            self._indent_unit = unit
+        return unit
+
+    def _modified(self, mod):
+        # semantic colours come from the last analysis; positions go stale once the text changes
+        if mod and hasattr(self.highlighter, "disable_semantic"):
+            self.highlighter.disable_semantic()
+
+    def set_semantic(self, tokens, type_names=None, macro_names=None):
+        if hasattr(self.highlighter, "set_semantic"):
+            if type_names is not None:
+                self.highlighter.type_names = type_names
+            if macro_names is not None:
+                self.highlighter.macro_names = macro_names
+            self.highlighter.set_semantic(tokens)
+
+    # ---- font / zoom ------------------------------------------------------------------
+    def set_editor_font(self, font):
+        self.setFont(font)
+        self.document().setDefaultFont(font)
+        self.setTabStopDistance(self.fontMetrics().horizontalAdvance(" ") * 4)
+        self._update_width()
+        self.line_area.update()
+        self.viewport().update()
+
+    def zoom(self, delta):
+        f = QFont(self.font())
+        f.setPointSizeF(min(40.0, max(6.0, f.pointSizeF() + delta)))
+        self.set_editor_font(f)
+
+    def zoom_reset(self):
+        self.set_editor_font(mono_font())
+
+    def wheelEvent(self, e):
+        if e.modifiers() & Qt.ControlModifier:
+            self.zoom(1 if e.angleDelta().y() > 0 else -1)
+            return
+        super().wheelEvent(e)
+
+    # ---- Visual Studio style decorations: indent guides and current line frame ------------
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        th = theme.code_theme()
+        p = QPainter(self.viewport())
+        try:
+            cw = self.fontMetrics().horizontalAdvance(" ")
+            left = self.contentOffset().x() + self.document().documentMargin()
+            pen = QPen(QColor(th["indent_guide"]), 1, Qt.DotLine)
+            p.setPen(pen)
+            unit = self.indent_unit()
+            block = self.firstVisibleBlock()
+            prev_indent = 0
+            rect = e.rect()
+            while block.isValid():
+                geo = self.blockBoundingGeometry(block).translated(self.contentOffset())
+                if geo.top() > rect.bottom():
+                    break
+                text = block.text()
+                stripped = text.lstrip(" \t")
+                if stripped:
+                    col = 0
+                    for ch in text[: len(text) - len(stripped)]:
+                        col = (col // 4 + 1) * 4 if ch == "\t" else col + 1
+                    indent = col
+                else:
+                    nxt = block.next()
+                    nxt_indent = 0
+                    while nxt.isValid() and not nxt.text().strip():
+                        nxt = nxt.next()
+                    if nxt.isValid():
+                        t2 = nxt.text()
+                        nxt_indent = len(t2) - len(t2.lstrip(" \t"))
+                    indent = min(prev_indent, nxt_indent)
+                if geo.bottom() >= rect.top():
+                    for level in range(0, indent, unit):
+                        x = int(left + level * cw + cw / 2)
+                        p.drawLine(x, int(geo.top()), x, int(geo.bottom()))
+                prev_indent = indent if stripped else prev_indent
+                block = block.next()
+            if th.get("current_line_border") and not self.textCursor().hasSelection():
+                blk = self.textCursor().block()
+                geo = self.blockBoundingGeometry(blk).translated(self.contentOffset())
+                p.setPen(QPen(QColor(th["current_line_border"]), 2))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(QRect(1, int(geo.top()) + 1, self.viewport().width() - 3, int(geo.height()) - 2))
+        finally:
+            p.end()
+
     def apply_theme(self):
         th = theme.code_theme()
         self.setStyleSheet(f"QPlainTextEdit {{ background:{th['background']}; color:{th['foreground']};"
                            f" selection-background-color:{th['selection']}; selection-color:{th['foreground']};"
                            f" border:0; border-radius:0; padding:0; }}")
         if hasattr(self, "highlighter"):
-            self.highlighter._build_formats()
-            self.highlighter.relex()
+            if hasattr(self.highlighter, "refresh_theme"):
+                self.highlighter.refresh_theme()
         self._update_extra()
         self.line_area.update()
 
@@ -201,12 +323,13 @@ class CodeEditor(QPlainTextEdit):
     def _update_extra(self):
         th = theme.code_theme()
         sels = []
-        cl = QTextEdit.ExtraSelection()
-        cl.format.setBackground(QColor(th["current_line"]))
-        cl.format.setProperty(QTextFormat.FullWidthSelection, True)
-        cl.cursor = self.textCursor()
-        cl.cursor.clearSelection()
-        sels.append(cl)
+        if th.get("current_line"):
+            cl = QTextEdit.ExtraSelection()
+            cl.format.setBackground(QColor(th["current_line"]))
+            cl.format.setProperty(QTextFormat.FullWidthSelection, True)
+            cl.cursor = self.textCursor()
+            cl.cursor.clearSelection()
+            sels.append(cl)
         if self._mark_line is not None:
             blk = self.document().findBlockByNumber(self._mark_line - 1)
             if blk.isValid():
@@ -228,6 +351,7 @@ class CodeEditor(QPlainTextEdit):
             sels.append(s)
         self.setExtraSelections(sels)
         self.line_area.update()
+        self.viewport().update()
 
     def set_occurrences(self, occ):
         self._occurrences = list(occ)

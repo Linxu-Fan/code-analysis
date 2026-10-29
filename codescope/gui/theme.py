@@ -54,36 +54,50 @@ TOKENS = {
     },
 }
 
-CODE_THEMES = {
-    "light": {
-        "background": "#ffffff", "foreground": "#1f2328", "linenumber_bg": "#f7f8fa",
-        "linenumber_fg": "#a3a8b1", "linenumber_current": "#1f2328", "current_line": "#f5f8fe",
-        "occurrence": "#d6e6ff", "selection": "#b6d4ff", "mark": "#fff1c2",
-        "Keyword": "#0033b3", "Keyword.Type": "#0033b3", "Name.Builtin": "#0033b3",
-        "Name.Function": "#00627a", "Name.Class": "#000000", "Name.Decorator": "#9e880d",
-        "String": "#067d17", "Number": "#1750eb", "Comment": "#8c8c8c", "Comment.Preproc": "#9e880d",
-        "Operator": "#1f2328", "Name.Namespace": "#000000",
+# Editor colour schemes modelled on Visual Studio 2022 (C++ / Python colours).
+CODE_SCHEMES = {
+    "vs-light": {
+        "label": "Visual Studio Light",
+        "background": "#ffffff", "foreground": "#000000", "linenumber_bg": "#ffffff",
+        "linenumber_fg": "#2b91af", "linenumber_current": "#0b216f", "current_line": None,
+        "current_line_border": "#e4e4e4", "indent_guide": "#d0d0d0", "occurrence": "#e0e0e0",
+        "selection": "#add6ff", "mark": "#fff3c4",
+        "keyword": "#0000ff", "type": "#2b91af", "function": "#74531f", "string": "#a31515",
+        "number": "#000000", "comment": "#008000", "preproc": "#808080", "macro": "#8a1bff",
+        "namespace": "#000000", "enumerator": "#2f4f4f", "operator": "#000000", "escape": "#b776fb",
+        "doc_comment": "#008000",
     },
-    "dark": {
-        "background": "#1e1f22", "foreground": "#bcbec4", "linenumber_bg": "#1e1f22",
-        "linenumber_fg": "#4b5059", "linenumber_current": "#a1a3ab", "current_line": "#26282e",
-        "occurrence": "#2d4565", "selection": "#214283", "mark": "#33322b",
-        "Keyword": "#cf8e6d", "Keyword.Type": "#cf8e6d", "Name.Builtin": "#8888c6",
-        "Name.Function": "#56a8f5", "Name.Class": "#bcbec4", "Name.Decorator": "#b3ae60",
-        "String": "#6aab73", "Number": "#2aacb8", "Comment": "#7a7e85", "Comment.Preproc": "#b3ae60",
-        "Operator": "#bcbec4", "Name.Namespace": "#bcbec4",
+    "vs-dark": {
+        "label": "Visual Studio Dark",
+        "background": "#1e1e1e", "foreground": "#dcdcdc", "linenumber_bg": "#1e1e1e",
+        "linenumber_fg": "#2b91af", "linenumber_current": "#c6c6c6", "current_line": None,
+        "current_line_border": "#464646", "indent_guide": "#404040", "occurrence": "#343434",
+        "selection": "#264f78", "mark": "#3a3a22",
+        "keyword": "#569cd6", "type": "#4ec9b0", "function": "#dcdcaa", "string": "#d69d85",
+        "number": "#b5cea8", "comment": "#57a64a", "preproc": "#9b9b9b", "macro": "#beb7ff",
+        "namespace": "#c8c8c8", "enumerator": "#b8d7a3", "operator": "#b4b4b4", "escape": "#ffd68f",
+        "doc_comment": "#57a64a",
     },
 }
+# kept for compatibility with older settings / callers
+CODE_THEMES = {"light": CODE_SCHEMES["vs-light"], "dark": CODE_SCHEMES["vs-dark"]}
 
-current = {"name": "dark"}
+current = {"name": "dark", "editor_scheme": "auto"}
 
 
 def tokens():
     return TOKENS[current["name"]]
 
 
+def editor_scheme_name():
+    name = current.get("editor_scheme", "auto")
+    if name not in CODE_SCHEMES:
+        name = "vs-dark" if current["name"] == "dark" else "vs-light"
+    return name
+
+
 def code_theme():
-    return CODE_THEMES[current["name"]]
+    return CODE_SCHEMES[editor_scheme_name()]
 
 
 def is_dark():
