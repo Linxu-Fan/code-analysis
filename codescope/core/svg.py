@@ -38,12 +38,15 @@ def to_svg(g: Graph, links=None) -> str:
            '<marker id="tri" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" '
            'orient="auto"><path d="M0,0 L12,6 L0,12 z" fill="#ffffff" stroke="#c08a00"/></marker></defs>',
            f'<rect width="100%" height="100%" fill="#ffffff"/>',
-           f'<text x="10" y="{h - 8:.0f}" fill="#666" font-size="11">{escape(g.title)}</text>']
+           f'<text x="10" y="{h - 8:.0f}" fill="#666" font-size="11">{escape(g.title + (" - " + g.note if g.note else ""))}</text>']
+    import math
+    maxw = max((e.weight for e in g.edges), default=1.0)
     for e in g.edges:
         color = EDGE_COLORS.get(e.kind, EDGE_COLORS.get(e.label, "#6b7280"))
+        width = 1.3 + (2.7 * math.log1p(e.weight) / math.log1p(maxw) if maxw > 1 else 0)
         marker = "tri" if e.kind in ("Inherit", "Implement") else "arrow"
         dash = ' stroke-dasharray="5,4"' if e.kind in ("assoc", "Implement") else ""
-        out.append(f'<path d="{_path(e.points)}" fill="none" stroke="{color}" stroke-width="1.3"{dash} '
+        out.append(f'<path d="{_path(e.points)}" fill="none" stroke="{color}" stroke-width="{width:.1f}"{dash} '
                    f'marker-end="url(#{marker})"/>')
         if e.label and e.points:
             mid = e.points[len(e.points) // 2] if len(e.points) > 2 else (

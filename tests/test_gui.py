@@ -54,6 +54,11 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
         assert isinstance(win.tabs.currentWidget(), GraphPanel)
         assert win.tabs.currentWidget().graph.nodes
     win.open_graph("architecture", None)
+    panel = win.tabs.currentWidget()
+    some = next(iter(panel.canvas.node_items))
+    panel.canvas.highlight(some)
+    panel.canvas.highlight(None)
+    assert panel.canvas.find("src") >= 1
     win.a_metrics.trigger()
     win.a_treemap.trigger()
     win.a_dsm.trigger()

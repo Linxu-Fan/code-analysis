@@ -151,3 +151,33 @@ def test_layout_cycles():
         row.sort(key=lambda n: n.x)
         for a, b in zip(row, row[1:]):
             assert a.x + a.width / 2 <= b.x - b.width / 2 + 0.01
+
+
+def test_layout_left_to_right_keeps_box_shape():
+    from codescope.core.layout import Graph, measure
+    g = Graph(direction="LR")
+    for i in range(6):
+        g.add_node(i, f"some/long/directory/name{i}/")
+    for a, b in [(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (4, 5), (5, 0)]:
+        g.add_edge(a, b)
+    layout(g)
+    for n in g.nodes.values():
+        w, h = measure(n.label)
+        assert (round(n.width), round(n.height)) == (round(w), round(h))     # not swapped
+    by_col = {}
+    for n in g.nodes.values():
+        by_col.setdefault(round(n.x), []).append(n)
+    for col in by_col.values():
+        col.sort(key=lambda n: n.y)
+        for a, b in zip(col, col[1:]):
+            assert a.y + a.height / 2 <= b.y - b.height / 2 + 0.01
+
+
+def test_dependency_graphs_stay_readable(all_db):
+    from codescope.core.graphs import architecture_graph, auto_dir_level, file_dependency_graph
+    level = auto_dir_level(all_db)
+    g = architecture_graph(all_db, level)
+    assert g.nodes and all(e.weight >= 1 for e in g.edges)
+    assert len(g.edges) <= max(3 * len(g.nodes), 20)
+    g = file_dependency_graph(all_db, max_nodes=3)
+    assert len(g.nodes) <= 3

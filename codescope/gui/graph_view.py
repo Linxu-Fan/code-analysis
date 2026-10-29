@@ -9,6 +9,7 @@ from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QPainte
                            QPolygonF)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGraphicsItem, QGraphicsPathItem,
                                QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QLabel,
+                               QLineEdit,
                                QMessageBox, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..core import graphs as G
@@ -45,7 +46,7 @@ class NodeItem(QGraphicsItem):
         self.setFlags(QGraphicsItem.ItemIsSelectable)
         self.setAcceptHoverEvents(True)
         self.setPos(node.x, node.y)
-        self.setToolTip(node.label if "\n" not in node.label else node.label.split("\n")[0])
+        self.setToolTip(node.style.get("tooltip") or node.label.split("\n")[0])
         self.hover = False
         self.setZValue(2)
 
@@ -126,11 +127,12 @@ class NodeItem(QGraphicsItem):
 
     def mousePressEvent(self, e):
         super().mousePressEvent(e)
+        self.view.highlight(self.node.id)
         self.view.nodeClicked.emit(self.node.data)
 
 
 class EdgeItem(QGraphicsPathItem):
-    def __init__(self, edge):
+    def __init__(self, edge, max_weight=1.0):
         super().__init__()
         self.edge = edge
         pts = [QPointF(x, y) for x, y in edge.points]
@@ -145,13 +147,23 @@ class EdgeItem(QGraphicsPathItem):
                     path.quadTo(pts[i], mid)
         self.setPath(path)
         color = QColor(EDGE_COLORS.get(edge.kind, EDGE_COLORS.get(edge.label, "#7d8590")))
-        pen = QPen(color, 1.3)
+        width = 1.3
+        if max_weight > 1:
+            width += 3.0 * math.log1p(edge.weight) / math.log1p(max_weight)
+        pen = QPen(color, width)
+        if edge.weight > 1 or edge.label:
+            self.setToolTip(f"{edge.label or ''}".strip() + (f"  ({edge.weight:g} references)" if edge.weight > 1 else ""))
         if edge.kind in ("assoc", M.IMPLEMENT):
             pen.setStyle(Qt.DashLine)
         self.setPen(pen)
         self.color = color
         self.setZValue(1)
         self.hollow = edge.kind in (M.INHERIT, M.IMPLEMENT)
+
+    def set_emphasis(self, on):
+        pen = self.pen()
+        pen.setColor(QColor("#3b82f6") if on else self.color)
+        self.setPen(pen)
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.Antialiasing)
@@ -165,8 +177,9 @@ class EdgeItem(QGraphicsPathItem):
         a = QPointF(x2, y2)
         b = QPointF(x2 - size * math.cos(ang - 0.42), y2 - size * math.sin(ang - 0.42))
         c = QPointF(x2 - size * math.cos(ang + 0.42), y2 - size * math.sin(ang + 0.42))
-        painter.setPen(QPen(self.color, 1.3))
-        painter.setBrush(QColor("#ffffff") if self.hollow else self.color)
+        color = self.pen().color()
+        painter.setPen(QPen(color, 1.3))
+        painter.setBrush(QColor("#ffffff") if self.hollow else color)
         painter.drawPolygon(QPolygonF([a, b, c]))
 
     def boundingRect(self):
@@ -185,37 +198,74 @@ class GraphCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.graph = None
 
-    def show_graph(self, g):
+    MIN_READABLE_SCALE = 0.65
+
+    def show_graph(self, g, edge_labels=True):
         sc = self.scene()
         sc.clear()
         self.graph = g
+        self.node_items = {}
+        self.edge_items = []          # (edge, path item, label item or None)
+        self.highlighted = None
         bg = QColor("#1e1f22" if theme.current["name"] == "dark" else "#ffffff")
         sc.setBackgroundBrush(bg)
+        maxw = max((e.weight for e in g.edges), default=1.0)
         for e in g.edges:
-            if e.points:
-                sc.addItem(EdgeItem(e))
-                if e.label:
-                    t = QGraphicsSimpleTextItem(e.label)
-                    t.setFont(QFont("Segoe UI", 8))
-                    t.setBrush(QColor(EDGE_COLORS.get(e.kind, EDGE_COLORS.get(e.label, "#7d8590"))))
-                    mid = e.points[len(e.points) // 2] if len(e.points) > 2 else (
-                        (e.points[0][0] + e.points[-1][0]) / 2, (e.points[0][1] + e.points[-1][1]) / 2)
-                    t.setPos(mid[0] + 4, mid[1] - 14)
-                    t.setZValue(3)
-                    sc.addItem(t)
+            if not e.points:
+                continue
+            item = EdgeItem(e, maxw)
+            sc.addItem(item)
+            t = None
+            if e.label and edge_labels:
+                t = QGraphicsSimpleTextItem(e.label)
+                t.setFont(QFont("Segoe UI", 8))
+                t.setBrush(QColor(EDGE_COLORS.get(e.kind, EDGE_COLORS.get(e.label, "#7d8590"))))
+                mid = e.points[len(e.points) // 2] if len(e.points) > 2 else (
+                    (e.points[0][0] + e.points[-1][0]) / 2, (e.points[0][1] + e.points[-1][1]) / 2)
+                t.setPos(mid[0] + 4, mid[1] - 14)
+                t.setZValue(3)
+                sc.addItem(t)
+            self.edge_items.append((e, item, t))
         for n in g.nodes.values():
-            sc.addItem(NodeItem(n, self))
-        sc.setSceneRect(QRectF(0, 0, max(g.width, 200), max(g.height, 120)))
+            it = NodeItem(n, self)
+            sc.addItem(it)
+            self.node_items[n.id] = it
+        sc.setSceneRect(QRectF(0, 0, max(g.width, 200), max(g.height, 120)).adjusted(-40, -40, 40, 40))
         self._pending_fit = True
         if self.isVisible() and self.viewport().width() > 50:
             self._initial_fit()
 
+    def _focus_node(self):
+        g = self.graph
+        for n in g.nodes.values():
+            if n.style.get("focus"):
+                return n
+        degree = {}
+        for e in g.edges:
+            degree[e.src] = degree.get(e.src, 0) + 1
+            degree[e.dst] = degree.get(e.dst, 0) + 1
+        if degree:
+            return g.nodes[max(degree, key=degree.get)]
+        return min(g.nodes.values(), key=lambda n: (n.y, n.x)) if g.nodes else None
+
     def _initial_fit(self):
+        """Fit small graphs; open big ones at a readable zoom centred on the focus node."""
         self._pending_fit = False
         self.resetTransform()
         g = self.graph
-        if g is not None and (g.width > self.viewport().width() or g.height > self.viewport().height()):
+        if g is None or not g.nodes:
+            return
+        vw, vh = self.viewport().width(), self.viewport().height()
+        if g.width <= vw and g.height <= vh:
+            return
+        scale = min(vw / max(g.width + 80, 1), vh / max(g.height + 80, 1))
+        if scale >= self.MIN_READABLE_SCALE:
             self.fit()
+            return
+        self.scale(self.MIN_READABLE_SCALE, self.MIN_READABLE_SCALE)
+        n = self._focus_node()
+        if n is not None:
+            self.centerOn(n.x, n.y)
 
     def showEvent(self, e):
         super().showEvent(e)
@@ -228,6 +278,55 @@ class GraphCanvas(QGraphicsView):
             self.fitInView(self.scene().sceneRect(), Qt.KeepAspectRatio)
             if self.transform().m11() > 1.0:
                 self.resetTransform()
+
+    def highlight(self, node_id):
+        """Emphasise a node, its edges and its neighbours; dim everything else (None clears)."""
+        self.highlighted = node_id
+        if node_id is None:
+            for it in self.node_items.values():
+                it.setOpacity(1.0)
+            for e, item, t in self.edge_items:
+                item.setOpacity(1.0)
+                item.setZValue(1)
+                item.set_emphasis(False)
+                if t is not None:
+                    t.setOpacity(1.0)
+            return
+        near = {node_id}
+        for e, item, t in self.edge_items:
+            on = node_id in (e.src, e.dst)
+            if on:
+                near.update((e.src, e.dst))
+            item.setOpacity(1.0 if on else 0.08)
+            item.setZValue(1.5 if on else 1)
+            item.set_emphasis(on)
+            if t is not None:
+                t.setOpacity(1.0 if on else 0.08)
+        for nid, it in self.node_items.items():
+            it.setOpacity(1.0 if nid in near else 0.25)
+
+    def find(self, text):
+        """Select nodes whose label contains *text* and centre on the first; returns match count."""
+        text = text.strip().lower()
+        self.scene().clearSelection()
+        if not text:
+            self.highlight(None)
+            return 0
+        hits = [it for it in self.node_items.values() if text in it.node.label.lower()]
+        for it in hits:
+            it.setSelected(True)
+        if hits:
+            self.highlight(hits[0].node.id)
+            if self.transform().m11() < self.MIN_READABLE_SCALE:
+                self.resetTransform()
+                self.scale(self.MIN_READABLE_SCALE, self.MIN_READABLE_SCALE)
+            self.centerOn(hits[0])
+        return len(hits)
+
+    def mousePressEvent(self, e):
+        if self.itemAt(e.position().toPoint()) is None and self.highlighted is not None:
+            self.highlight(None)
+        super().mousePressEvent(e)
 
     def wheelEvent(self, e):
         f = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
@@ -274,15 +373,27 @@ class GraphPanel(QWidget):
             idx = self.type_box.count() - 1
         self.type_box.setCurrentIndex(idx)
         self.depth = QSpinBox(minimum=1, maximum=10, value=3)
-        self.depth.setToolTip("Depth")
+        self.depth_label = QLabel("Depth:")
         self.hide_unres = QCheckBox("Hide unresolved")
         self.lr = QCheckBox("Left to right")
+        self.lr.setToolTip("Draw ranks from left to right instead of top to bottom")
+        self._lr_default = None
+        self.labels = QCheckBox("Edge labels")
+        self.labels.setChecked(True)
+        self.find_box = QLineEdit(placeholderText="Find node\u2026", clearButtonEnabled=True)
+        self.find_box.setMaximumWidth(180)
+        self.note = QLabel()
+        self.note.setStyleSheet("color:#b35900")
+        self.note.setMaximumWidth(320)
         bar.addWidget(QLabel("Graph:"))
         bar.addWidget(self.type_box)
-        bar.addWidget(QLabel("Depth:"))
+        bar.addWidget(self.depth_label)
         bar.addWidget(self.depth)
         bar.addWidget(self.hide_unres)
         bar.addWidget(self.lr)
+        bar.addWidget(self.labels)
+        bar.addWidget(self.find_box)
+        bar.addWidget(self.note)
         bar.addStretch(1)
         for text, tip, fn in (("−", "Zoom out", lambda: self.canvas.zoom(1 / 1.25)),
                               ("+", "Zoom in", lambda: self.canvas.zoom(1.25)),
@@ -302,10 +413,34 @@ class GraphPanel(QWidget):
         self.depth.valueChanged.connect(self.refresh)
         self.hide_unres.toggled.connect(self.refresh)
         self.lr.toggled.connect(self.refresh)
+        self.labels.toggled.connect(self._labels_toggled)
+        self.find_box.textChanged.connect(self._find)
         self.canvas.nodeClicked.connect(self._clicked)
         self.canvas.nodeActivated.connect(self._activated)
         self.graph = None
+        self._configure_depth(kind)
         self.refresh()
+
+    def _configure_depth(self, kind):
+        """For dependency graphs the spin box selects the directory level."""
+        self.depth.blockSignals(True)
+        if kind == "architecture":
+            self.depth_label.setText("Folder level:")
+            self.depth.setToolTip("How many directory levels to show; lower = fewer, bigger groups")
+            self.depth.setValue(G.auto_dir_level(self.db))
+        else:
+            self.depth_label.setText("Depth:")
+            self.depth.setToolTip("How many levels of relationships to follow")
+        self.depth.blockSignals(False)
+
+    def _labels_toggled(self, on):
+        self._labels_touched = True
+        self.canvas.show_graph(self.graph, on)
+
+    def _find(self, text):
+        n = self.canvas.find(text)
+        self.find_box.setStyleSheet("" if n or not text else "background:#5c1f1f" if
+                                    theme.current["name"] == "dark" else "background:#ffd6d6")
 
     @property
     def title(self):
@@ -314,18 +449,34 @@ class GraphPanel(QWidget):
 
     def refresh(self):
         kind = self.type_box.currentData()
+        if kind != self.kind:
+            self._configure_depth(kind)
         self.kind = kind
         if kind == "architecture":
-            g = G.architecture_graph(self.db)
+            g = G.architecture_graph(self.db, self.depth.value())
         elif kind == "uml" and self.entity is None:
             g = G.uml_graph(self.db, None)
         else:
             g = G.build_graph(self.db, kind, self.entity, self.depth.value(), self.hide_unres.isChecked())
-        if self.lr.isChecked():
-            g.direction = "LR" if g.direction == "TB" else "TB"
+        if self._lr_default is None or kind != getattr(self, "_lr_kind", None):
+            # follow the graph type's natural direction until the user flips it
+            self._lr_kind = kind
+            self._lr_default = g.direction == "LR"
+            self.lr.blockSignals(True)
+            self.lr.setChecked(self._lr_default)
+            self.lr.blockSignals(False)
+        g.direction = "LR" if self.lr.isChecked() else "TB"
         layout(g, measure_fn=_measure_factory())
         self.graph = g
-        self.canvas.show_graph(g)
+        if len(g.edges) > 30 and self.labels.isChecked() and not getattr(self, "_labels_touched", False):
+            self.labels.blockSignals(True)
+            self.labels.setChecked(False)        # too many numbers on screen; thickness shows weight
+            self.labels.blockSignals(False)
+        self.note.setText(g.note)
+        self.note.setToolTip(g.note)
+        self.canvas.show_graph(g, self.labels.isChecked())
+        if self.find_box.text():
+            self.canvas.find(self.find_box.text())
 
     def _clicked(self, data):
         if isinstance(data, int):

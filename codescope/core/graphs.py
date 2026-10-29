@@ -55,8 +55,8 @@ def _node(g, e, focus=False):
     return n
 
 
-def call_graph(db, ent, depth=3, reverse=False, hide_unresolved=False, max_nodes=250):
-    g = Graph(title=f"{'Called By' if reverse else 'Calls'}: {ent.longname}")
+def call_graph(db, ent, depth=3, reverse=False, hide_unresolved=False, max_nodes=120):
+    g = Graph(title=f"{'Called By' if reverse else 'Calls'}: {ent.longname}", direction="LR")
     kinds = (M.CALL, M.CREATE)
     _node(g, ent, True)
     frontier = [ent.id]
@@ -67,8 +67,8 @@ def call_graph(db, ent, depth=3, reverse=False, hide_unresolved=False, max_nodes
             for other in db.related(eid, kinds, reverse=reverse):
                 if hide_unresolved and other.is_unresolved:
                     continue
-                if len(g.nodes) >= max_nodes and other.id not in seen:
-                    g.title += "  (truncated)"
+                if len(g.nodes) >= max_nodes and other.id not in g.nodes:
+                    g.note = f"limited to {max_nodes} nodes (reduce depth)"
                     continue
                 _node(g, other)
                 if reverse:
@@ -223,7 +223,7 @@ def uml_graph(db, ent=None, max_classes=60):
 
 
 def include_graph(db, file_ent, depth=4, reverse=False):
-    g = Graph(title=f"{'Included By' if reverse else 'Includes'}: {file_ent.longname}")
+    g = Graph(title=f"{'Included By' if reverse else 'Includes'}: {file_ent.longname}", direction="LR")
     kinds = (M.INCLUDE, M.IMPORT)
     _node(g, file_ent, True)
     frontier = [file_ent.id]
@@ -262,7 +262,20 @@ def file_dependencies(db):
     return deps
 
 
-def file_dependency_graph(db, file_ent=None, max_nodes=150):
+MAX_DEP_NODES = 40          # beyond this a dependency graph stops being readable
+
+
+def _keep_strongest(g, pairs, max_edges):
+    """Add the heaviest (a, b, n) pairs as weighted edges; note how many were left out."""
+    pairs = sorted(pairs, key=lambda x: -x[2])
+    kept = pairs[:max_edges]
+    for a, b, n in kept:
+        g.add_edge(a, b, label=str(n), weight=n)
+    if len(pairs) > len(kept):
+        g.note = f"{len(kept)} strongest of {len(pairs)} dependencies"
+
+
+def file_dependency_graph(db, file_ent=None, max_nodes=MAX_DEP_NODES):
     deps = file_dependencies(db)
     g = Graph(title="File Dependencies" + (f": {file_ent.longname}" if file_ent else ""), direction="LR")
     pairs = []
@@ -277,48 +290,73 @@ def file_dependency_graph(db, file_ent=None, max_nodes=150):
         for a, m in deps.items():
             for b, n in m.items():
                 pairs.append((a, b, n))
+    # keep the most connected files
+    degree = defaultdict(int)
     for a, b, n in pairs:
-        for fid in (a, b):
-            if fid not in g.nodes and len(g.nodes) < max_nodes:
-                f = db.file(fid)
-                g.add_node(fid, f.relpath, M.FILE, data=f.entity_id)
-        if a in g.nodes and b in g.nodes:
-            g.add_edge(a, b, label=str(n))
-    if file_ent is not None and file_ent.file_id in g.nodes:
+        degree[a] += n
+        degree[b] += n
+    keep = set(sorted(degree, key=lambda f: -degree[f])[:max_nodes])
+    if file_ent is not None:
+        keep.add(file_ent.file_id)
+    for fid in sorted(keep, key=lambda f: db.file(f).relpath):
+        f = db.file(fid)
+        g.add_node(fid, f.relpath, M.FILE, data=f.entity_id)
+    _keep_strongest(g, [p for p in pairs if p[0] in keep and p[1] in keep], max(3 * len(keep), 20))
+    if len(degree) > len(keep):
+        g.note = (g.note + "; " if g.note else "") + f"{len(keep)} of {len(degree)} files"
+    if file_ent is not None:
         g.nodes[file_ent.file_id].style["focus"] = True
-    elif file_ent is not None:
-        g.add_node(file_ent.file_id, file_ent.longname, M.FILE, data=file_ent.id, focus=True)
     return g
+
+
+def _dir_at(relpath, level):
+    d = posixpath.dirname(relpath)
+    if level is not None:
+        d = "/".join(d.split("/")[:level])
+    return d or "."
+
+
+def auto_dir_level(db, max_nodes=25):
+    """Deepest directory level that still gives at most *max_nodes* directories."""
+    rels = [f.relpath for f in db.files()]
+    deepest = max((len(posixpath.dirname(r).split("/")) for r in rels), default=1)
+    best = 1
+    for level in range(1, deepest + 1):
+        if len({_dir_at(r, level) for r in rels}) <= max_nodes:
+            best = level
+        else:
+            break
+    return best
 
 
 def directory_dependencies(db, level=None):
     """Aggregate file dependencies to directories: {(dir a, dir b): count}."""
     deps = file_dependencies(db)
     rel = {f.id: f.relpath for f in db.files()}
-
-    def d(fid):
-        p = posixpath.dirname(rel.get(fid, ""))
-        if level is not None:
-            p = "/".join(p.split("/")[:level])
-        return p or "."
     out = defaultdict(int)
     for a, m in deps.items():
         for b, n in m.items():
-            da, dbb = d(a), d(b)
+            da, dbb = _dir_at(rel.get(a, ""), level), _dir_at(rel.get(b, ""), level)
             if da != dbb:
                 out[(da, dbb)] += n
     return out
 
 
 def architecture_graph(db, level=None):
-    g = Graph(title="Architecture (directory dependencies)", direction="LR")
-    dirs = {posixpath.dirname(f.relpath) or "." for f in db.files()}
-    if level is not None:
-        dirs = {"/".join(x.split("/")[:level]) or "." for x in dirs}
-    for x in sorted(dirs):
-        g.add_node(x, x + "/", "dir")
-    for (a, b), n in directory_dependencies(db, level).items():
-        g.add_edge(a, b, label=str(n))
+    if level is None:
+        level = auto_dir_level(db)
+    g = Graph(title=f"Architecture (directory dependencies, level {level})", direction="LR")
+    dirs = {_dir_at(f.relpath, level) for f in db.files()}
+    pairs = [(a, b, n) for (a, b), n in directory_dependencies(db, level).items()]
+    connected = {a for a, _, _ in pairs} | {b for _, b, _ in pairs}
+    for x in sorted(dirs & connected) or sorted(dirs):
+        parts = x.split("/")
+        short = "\u2026/" + "/".join(parts[-2:]) if len(parts) > 2 else x
+        g.add_node(x, short + "/", "dir", tooltip=x + "/")
+    _keep_strongest(g, pairs, max(3 * len(connected), 20))
+    hidden = len(dirs - connected)
+    if hidden and connected:
+        g.note = (g.note + "; " if g.note else "") + f"{hidden} unconnected folders hidden"
     return g
 
 
@@ -357,5 +395,5 @@ def build_graph(db, kind, ent, depth=3, hide_unresolved=False):
     if kind == "control":
         return control_flow_graph(db, ent)
     if kind == "architecture":
-        return architecture_graph(db)
+        return architecture_graph(db, depth)
     raise KeyError(kind)
