@@ -159,7 +159,7 @@ class TreeCanvas(QGraphicsView):
             if tree.kind == "class" and child.rel == "member":
                 continue                               # member lists: plain connectors
             ah = QPainterPath()
-            if tree.kind == "class" and child.rel == "compose":
+            if tree.kind == "class" and child.rel in ("compose", "field"):
                 # UML composition: filled diamond at the containing class (path start)
                 tip = path.pointAtPercent(0.0)
                 ah.addPolygon(QPolygonF([tip, QPointF(tip.x() + 7, tip.y() - 4.5), QPointF(tip.x() + 14, tip.y()),
@@ -305,9 +305,9 @@ class CallTreePanel(QWidget):
             self.relation.hide()
         elif mode == "class":
             self.expand.hide()
-            self.hide_unres.setText("Hide external types")
-            self.hide_unres.setToolTip("Hide types defined outside the project (e.g. std::exception, int, "
-                                       "Eigen::VectorXd)")
+            self.hide_unres.setText("Hide external bases")
+            self.hide_unres.setToolTip("Hide base classes defined outside the project (e.g. std::exception). "
+                                       "Data members are always listed, whatever their type.")
         bar.addWidget(QLabel("Function:" if call else "Class:"))
         bar.addWidget(self.picker, 1)
         bar.addWidget(self.relation)

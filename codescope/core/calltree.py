@@ -186,15 +186,17 @@ def _member_text(m, mult="", type_name=None):
     return f"{mark} {m.name}{mult}" + (f" : {t}" if t else "") + static
 
 
-def _member_lines(db, cls, limit=8):
+def _member_lines(db, cls, limit=None):
     fields, methods = [], []
     for m in db.children(cls.id):
         if m.kind in (M.FIELD, M.PROPERTY, M.ENUMERATOR):
             fields.append(_member_text(m))
         elif m.kind in M.FUNCTION_KINDS:
             methods.append(_member_text(m))
-    out = fields[:limit] + ([f"  \u2026 {len(fields) - limit} more fields"] if len(fields) > limit else [])
-    out += methods[:limit] + ([f"  \u2026 {len(methods) - limit} more methods"] if len(methods) > limit else [])
+    if limit is not None:
+        fields = fields[:limit] + ([f"  \u2026 {len(fields) - limit} more fields"] if len(fields) > limit else [])
+        methods = methods[:limit] + ([f"  \u2026 {len(methods) - limit} more methods"] if len(methods) > limit else [])
+    out = fields + methods
     return out or ["(no members)"]
 
 
@@ -306,26 +308,6 @@ def _field_types(db, f, hide_unresolved, cache):
     return targets
 
 
-def _parts(db, cls, hide_unresolved, cache):
-    """Types held by the fields of *cls*, in declaration order: [(entity, line, file, via)]."""
-    order, info = [], {}
-    for f in db.children(cls.id, [M.FIELD, M.PROPERTY]):
-        if "static" in f.modifiers.split():
-            continue
-        targets = _field_types(db, f, hide_unresolved, cache)
-        mult = _multiplicity(f.signature or "")
-        for e in targets:
-            if e.id == cls.id and not mult:
-                continue
-            label = f.name + mult
-            if e.id not in info:
-                order.append(e.id)
-                info[e.id] = [e, f.line, f.file_id, [label]]
-            elif label not in info[e.id][3]:
-                info[e.id][3].append(label)
-    return [(info[i][0], info[i][1], info[i][2], ", ".join(info[i][3])) for i in order]
-
-
 def _holding_fields(db, cls):
     """Fields of other classes whose declared type involves *cls*: [(field, owner class)]."""
     names = {cls.name}
@@ -351,6 +333,28 @@ def _holding_fields(db, cls):
                 owner = db.parent(f)
                 if owner is not None and owner.kind in M.CLASS_KINDS and owner.id != cls.id:
                     out.append((f, owner))
+    return out
+
+
+def _data_members(db, cls, cache):
+    """Every data member of *cls* in declaration order, as class tree items (entity, line, file, rel, via).
+
+    A member whose type is a project class (also inside vector, shared_ptr, optional, ...) points
+    to that class, so its structure can be expanded ("compose").  Any other member (int, double,
+    std::string, Eigen types, static members) is a leaf showing its declared type ("field").
+    """
+    out = []
+    for f in db.children(cls.id, [M.FIELD, M.PROPERTY]):
+        static = "static" in f.modifiers.split()
+        mult = _multiplicity(f.signature or "") if f.lang != "python" else ""
+        targets = [] if static else [t for t in _field_types(db, f, True, cache)
+                                     if t.kind in M.CLASS_KINDS and not (t.id == cls.id and not mult)]
+        if targets:
+            out += [(t, f.line, f.file_id, "compose", f.name + mult) for t in targets]
+            continue
+        declared = (_declared_type(f) if f.lang != "python" else None) or f.type
+        text = f.name + mult + (f" : {declared}" if declared else "") + (" {static}" if static else "")
+        out.append((f, f.line, f.file_id, "field", text))
     return out
 
 
@@ -384,7 +388,7 @@ def build_class_tree(db, entity, descendants=True, ancestors=True, depth=6, hide
         out = []
         if side == DOWN:
             if compose:
-                out += [(x, l, f, "compose", via) for x, l, f, via in _parts(db, e, hide_unresolved, cache)]
+                out += _data_members(db, e, cache) if e.kind in M.CLASS_KINDS else []
             if inherit:
                 out += [(x, l, f, "inherit", "") for x, l, f in _derived(db, e.id)]
         else:
@@ -903,6 +907,8 @@ def _display(n: TreeNode):
     label = n.label
     if n.rel == "target":                 # modification tree of one member: Class::member
         label += ("::" if n.entity.lang in ("c", "cpp") else ".") + n.via
+    if n.rel == "field":                  # data member of a non-project type: 'time_step : double'
+        label = n.via
     if n.rel == "compose" and n.via:
         label = f"{n.via} : {label}" if n.side == DOWN else f"{label}.{n.via}"
     if n.recursive:
@@ -1015,7 +1021,8 @@ def to_svg(tree: CallTree, title=""):
         entry = tree.kind == "modify" and parent.depth == 0      # root -> entry point: not a call
         dash = ' stroke-dasharray="4,3"' if child.entity.is_unresolved or entry else ""
         if tree.kind == "class":
-            marker = {"compose": 'marker-start="url(#dia)"', "inherit": 'marker-start="url(#tri)"'}.get(child.rel, "")
+            marker = {"compose": 'marker-start="url(#dia)"', "field": 'marker-start="url(#dia)"',
+                      "inherit": 'marker-start="url(#tri)"'}.get(child.rel, "")
         else:
             marker = "" if entry else 'marker-end="url(#ah)"'
         out.append(f'<path d="{path_d(connector(parent, child, side))}" fill="none" stroke="#8b949e" '
@@ -1063,10 +1070,10 @@ def to_text(tree: CallTree):
     if tree.kind == "class":
         up_title, down_title = {
             "inherit": ("Base classes (ancestors):", "Derived classes (descendants):"),
-            "compose": ("Contained in (ancestors):", "Member types (descendants):"),
+            "compose": ("Contained in (ancestors):", "Data members (descendants):"),
             "members": ("Direct base classes and containers (ancestors):", "Members (descendants):"),
         }.get(tree.relation, ("Base classes and containers (ancestors):",
-                              "Member types and derived classes (descendants):"))
+                              "Data members and derived classes (descendants):"))
     elif tree.kind == "modify":
         up_title, down_title = "", "Modified in (call paths, in execution order):"
     else:

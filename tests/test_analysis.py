@@ -243,12 +243,15 @@ def test_class_tree(tmp_path):
     Analyzer(db).analyze()
     base = one(db, "Base")
     t = build_class_tree(db, base, descendants=True, ancestors=True)
-    assert [c.entity.name for c in t.down] == ["Left", "Right"]
-    left, right = t.down
+    # every data member is listed (here Base::id), followed by the derived classes
+    assert [(c.entity.name, c.rel) for c in t.down] == [("id", "field"), ("Left", "inherit"), ("Right", "inherit")]
+    assert t.down[0].via == "id : int"
+    left, right = t.down[1:]
     assert [c.entity.name for c in left.children] == ["Diamond"]
     assert left.children[0].children[0].entity.name == "Leaf"
     # the diamond is expanded once and marked where it appears again
-    assert right.children[0].entity.name == "Diamond" and right.children[0].repeated
+    assert [c.via for c in right.children if c.rel == "field"] == ["extra : int"]
+    assert right.children[-1].entity.name == "Diamond" and right.children[-1].repeated
     assert t.up == []
     up = build_class_tree(db, one(db, "Leaf"), descendants=False, ancestors=True)
     assert [c.entity.name for c in up.up] == ["Diamond"]
@@ -259,7 +262,7 @@ def test_class_tree(tmp_path):
     assert m.root.height > 40                       # member card is taller than a plain box
     svg = to_svg(m, "classes")
     assert 'marker-start="url(#tri)"' in svg and "+ run() {virtual}" in svg
-    assert "Member types and derived classes (descendants):" in to_text(t)
+    assert "Data members and derived classes (descendants):" in to_text(t)
     inh = build_class_tree(db, base, relation="inherit")
     assert "Derived classes (descendants):" in to_text(inh)
     lone = build_class_tree(db, one(db, "Lone"))
@@ -286,15 +289,16 @@ def test_class_tree_composition(tmp_path):
     Analyzer(db).analyze()
     model = one(db, "eng::Model")
     t = build_class_tree(db, model, hide_unresolved=True)
-    assert [(c.entity.name, c.via, c.rel) for c in t.down] == [("Builder", "storage_*", "compose")]
+    assert [(c.entity.name, c.via, c.rel) for c in t.down] == [("Builder", "storage_*", "compose"),
+                                                                ("count", "count : int {static}", "field")]
     parts = {c.entity.name: c.via for c in t.down[0].children}
-    assert parts == {"Link": "links[]", "Joint": "joints[]"}
+    assert parts == {"Link": "links[]", "Joint": "joints[]", "dt": "dt : Real"}   # every data member
     assert [(c.entity.name, c.via) for c in t.up] == [("World", "model_")]
     text = to_text(t)
     assert "storage_* : Builder" in text and "World.model_" in text
     # external types (double behind the Real alias) are listed unless hidden
     full = build_class_tree(db, one(db, "eng::Builder"), ancestors=False)
-    assert any(c.via == "dt" for c in full.down)
+    assert any(c.via == "dt : Real" and c.rel == "field" for c in full.down)
     # inheritance only: a class without bases has nothing to show
     assert build_class_tree(db, model, relation="inherit").down == []
     layout_call_tree(t)
