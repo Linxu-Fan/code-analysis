@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (QBrush, QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen,
                            QPolygonF)
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QGraphicsItem, QGraphicsPathItem,
-                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QHBoxLayout, QLabel,
+                               QGraphicsScene, QGraphicsSimpleTextItem, QGraphicsView, QLabel,
                                QLineEdit,
                                QMessageBox, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
@@ -18,6 +18,7 @@ from ..core.layout import layout
 from ..core.style import EDGE_COLORS, FOCUS_BORDER, node_style, node_style_dark
 from ..core.svg import to_dot, to_svg
 from . import theme
+from .flow import FlowLayout
 
 FONT = QFont("Segoe UI", 9)
 MONO = QFont("Consolas", 9)
@@ -358,7 +359,7 @@ class GraphPanel(QWidget):
         self.canvas = GraphCanvas(self)
         self.canvas.setFrameShape(GraphCanvas.NoFrame)
         bar_w = QWidget(objectName="PanelBar")
-        bar = QHBoxLayout(bar_w)
+        bar = FlowLayout(bar_w)
         bar.setContentsMargins(8, 5, 8, 5)
         bar.setSpacing(6)
         self.type_box = QComboBox()

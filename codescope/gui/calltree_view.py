@@ -5,13 +5,14 @@ from __future__ import annotations
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QFileDialog, QGraphicsItem, QGraphicsPathItem,
-                               QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QGraphicsScene, QGraphicsView, QLabel, QLineEdit, QMenu,
                                QMessageBox, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
 from ..core import calltree as CT
 from ..core import model as M
 from ..core.style import _mix
 from . import theme
+from .flow import FlowLayout
 
 FONT = QFont("Segoe UI", 9)
 MONO = QFont("Consolas", 8)
@@ -241,12 +242,12 @@ class CallTreePanel(QWidget):
         self.entity = None
         self.tree = None
         bar_w = QWidget(objectName="PanelBar")
-        bar = QHBoxLayout(bar_w)
+        bar = FlowLayout(bar_w)
         bar.setContentsMargins(10, 6, 10, 6)
         bar.setSpacing(8)
         self.picker = QLineEdit(placeholderText="Choose a function…" if mode == "call" else
                                 "Choose a class or struct…", clearButtonEnabled=True)
-        self.picker.setMinimumWidth(280)
+        self.picker.setMinimumWidth(220)
         funcs = sorted({e.longname for e in db.entities(kinds=self.kinds) if e.file_id})
         comp = QCompleter(funcs, self.picker)
         comp.setCaseSensitivity(Qt.CaseInsensitive)
@@ -323,7 +324,7 @@ class CallTreePanel(QWidget):
         exp.clicked.connect(self.export)
         bar.addWidget(exp)
         self.canvas = TreeCanvas(self)
-        self.info = QLabel(objectName="Muted")
+        self.info = QLabel(objectName="Muted", wordWrap=True)
         self.info.setContentsMargins(10, 4, 10, 4)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
