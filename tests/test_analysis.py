@@ -423,3 +423,42 @@ def test_modification_tree_whole_object(tmp_path):
     direct = build_modify_tree(db, settings, whole=False)
     assert [c.entity.name for c in direct.down[0].children] == ["tune"]
     db.close()
+
+
+MEMBERS_CPP = """
+#include <vector>
+#include <memory>
+struct Part { double mass; void scale(double f); };
+struct Base { int id; };
+struct Holder { std::vector<Part> parts; std::shared_ptr<Part> main; int count() const; static int total; };
+class Machine : public Base { public: Holder holder; void run(); private: std::vector<int> ids; };
+struct Factory { Machine machine; };
+struct Plant { Factory factory; };
+"""
+
+
+def test_member_tree(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_member_tree, layout_call_tree, to_svg, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "m.hpp").write_text(MEMBERS_CPP)
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+    t = build_member_tree(db, one(db, "Machine"))
+    assert [c.via for c in t.down] == ["+ holder : Holder", "+ run()", "- ids[] : vector<int>"]
+    holder = t.down[0]
+    assert [c.via for c in holder.children] == ["+ parts[] : Part", "+ main* : Part", "+ count() : int",
+                                                "+ total : int {static}"]
+    parts, main = holder.children[:2]
+    assert [c.via for c in parts.children] == ["+ mass : double", "+ scale()"]
+    assert main.repeated and not main.children          # Part already expanded under parts
+    # ancestors: only the direct base and the direct container, not Plant
+    assert sorted((c.entity.name, c.rel) for c in t.up) == [("Base", "inherit"), ("Factory", "compose")]
+    shallow = build_member_tree(db, one(db, "Machine"), depth=1)
+    assert shallow.down[0].truncated and not shallow.down[0].children
+    text = to_text(t)
+    assert "Members (descendants):" in text and "Direct base classes and containers" in text
+    layout_call_tree(t)
+    assert "+ parts[] : Part" in to_svg(t, "Machine")
+    db.close()

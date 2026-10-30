@@ -164,17 +164,35 @@ INHERIT_KINDS = (M.INHERIT, M.IMPLEMENT)
 _VIS = {"public": "+", "private": "-", "protected": "#"}
 
 
+def _declared_type(m):
+    """Type text of a C/C++ member from its signature, without std:: ('vector<Index>')."""
+    sig = (m.signature or "").split("=")[0].split("{")[0]
+    i = sig.rfind(m.name)
+    text = (sig[:i] if i > 0 else sig).replace("std::", "")
+    text = re.sub(r"\b(static|mutable|inline|constexpr|const)\b", "", text)
+    return " ".join(text.split()) or None
+
+
+def _member_text(m, mult="", type_name=None):
+    """UML style line for a member: '+ name : type', '- run() : int {virtual}'."""
+    mods = m.modifiers.split()
+    mark = next((_VIS[x] for x in mods if x in _VIS), "-" if m.name.startswith("_") else "+")
+    static = " {static}" if "static" in mods else ""
+    if m.kind in M.FUNCTION_KINDS:
+        ret = f" : {m.type}" if m.type and m.type != "void" and m.kind != M.CONSTRUCTOR else ""
+        virt = " {virtual}" if {"virtual", "pure"} & set(mods) else ""
+        return f"{mark} {m.name}(){ret}{virt}{static}"
+    t = type_name or m.type
+    return f"{mark} {m.name}{mult}" + (f" : {t}" if t else "") + static
+
+
 def _member_lines(db, cls, limit=8):
     fields, methods = [], []
     for m in db.children(cls.id):
-        mods = m.modifiers.split()
-        mark = next((_VIS[x] for x in mods if x in _VIS), "-" if m.name.startswith("_") else "+")
         if m.kind in (M.FIELD, M.PROPERTY, M.ENUMERATOR):
-            fields.append(f"{mark} {m.name}" + (f" : {m.type}" if m.type else ""))
+            fields.append(_member_text(m))
         elif m.kind in M.FUNCTION_KINDS:
-            ret = f" : {m.type}" if m.type and m.type != "void" and m.kind != M.CONSTRUCTOR else ""
-            virt = " {virtual}" if {"virtual", "pure"} & set(mods) else ""
-            methods.append(f"{mark} {m.name}(){ret}{virt}")
+            methods.append(_member_text(m))
     out = fields[:limit] + ([f"  \u2026 {len(fields) - limit} more fields"] if len(fields) > limit else [])
     out += methods[:limit] + ([f"  \u2026 {len(methods) - limit} more methods"] if len(methods) > limit else [])
     return out or ["(no members)"]
@@ -259,36 +277,42 @@ def _class_by_name(db, name, lang_family, cache, _seen=None):
     return hit
 
 
+def _field_types(db, f, hide_unresolved, cache):
+    """Types a field holds (wrappers such as vector or shared_ptr unwrapped): [entity]."""
+    from .languages import family
+    fam = family(f.lang)
+    targets = []
+    for r in db.refs_from(f.id, [M.TYPED]):
+        e = db.entity(r.dst_id)
+        if e is None or e.name in _WRAPPERS:
+            continue
+        if e.kind == M.TYPEDEF:
+            e = _class_by_name(db, e.name, fam, cache) or e
+        # aliases of non-project types (e.g. Eigen vectors) count as external types
+        external = e.kind in M.UNRESOLVED_KINDS or e.kind == M.TYPEDEF
+        if (e.kind in M.CLASS_KINDS or (external and not hide_unresolved)) and e not in targets:
+            targets.append(e)
+    if not targets:
+        # older databases or dynamic languages: use the declared type text
+        text = (f.signature or f.type or "")
+        if f.signature and f.name in text:
+            text = text[: text.rfind(f.name)]
+        for word in _IDENT.findall(text):
+            if word in _WRAPPERS or word == f.name:
+                continue
+            e = _class_by_name(db, word, fam, cache)
+            if e is not None and e not in targets:
+                targets.append(e)
+    return targets
+
+
 def _parts(db, cls, hide_unresolved, cache):
     """Types held by the fields of *cls*, in declaration order: [(entity, line, file, via)]."""
-    from .languages import family
-    fam = family(cls.lang)
     order, info = [], {}
     for f in db.children(cls.id, [M.FIELD, M.PROPERTY]):
         if "static" in f.modifiers.split():
             continue
-        targets = []
-        for r in db.refs_from(f.id, [M.TYPED]):
-            e = db.entity(r.dst_id)
-            if e is None or e.name in _WRAPPERS:
-                continue
-            if e.kind == M.TYPEDEF:
-                e = _class_by_name(db, e.name, fam, cache) or e
-            # aliases of non-project types (e.g. Eigen vectors) count as external types
-            external = e.kind in M.UNRESOLVED_KINDS or e.kind == M.TYPEDEF
-            if e.kind in M.CLASS_KINDS or (external and not hide_unresolved):
-                targets.append(e)
-        if not targets:
-            # older databases or dynamic languages: use the declared type text
-            text = (f.signature or f.type or "")
-            if f.signature and f.name in text:
-                text = text[: text.rfind(f.name)]
-            for word in _IDENT.findall(text):
-                if word in _WRAPPERS or word == f.name:
-                    continue
-                e = _class_by_name(db, word, fam, cache)
-                if e is not None:
-                    targets.append(e)
+        targets = _field_types(db, f, hide_unresolved, cache)
         mult = _multiplicity(f.signature or "")
         for e in targets:
             if e.id == cls.id and not mult:
@@ -407,6 +431,67 @@ def build_class_tree(db, entity, descendants=True, ancestors=True, depth=6, hide
     return tree
 
 
+# ---- member trees --------------------------------------------------------------------------------
+
+MEMBER_KINDS = [M.FIELD, M.PROPERTY, M.METHOD, M.CONSTRUCTOR, M.FUNCTION]
+
+
+def build_member_tree(db, entity, descendants=True, ancestors=True, depth=3, hide_unresolved=True,
+                      max_nodes=1500):
+    """All members of a class/struct as a tree.
+
+    Descendants: every data member and member function in declaration order.  A data member
+    whose type is a project class (also inside vector, shared_ptr, optional, ...) expands into
+    the members of that class, level by level.  Ancestors: only the direct base classes and the
+    classes that directly hold this one in a field.
+    """
+    root = TreeNode(entity, 0)
+    tree = CallTree(root, kind="class", relation="members")
+    budget = [max_nodes]
+    cache = {}
+
+    def members(cls):
+        return db.children(cls.id, MEMBER_KINDS)
+
+    def expand(node, cls, path, level, expanded):
+        items = members(cls)
+        if level >= depth:
+            node.truncated = bool(items)
+            return
+        for m in items:
+            if budget[0] <= 0:
+                node.truncated = tree.truncated_nodes = True
+                return
+            budget[0] -= 1
+            is_field = m.kind in (M.FIELD, M.PROPERTY)
+            mult = _multiplicity(m.signature or "") if is_field else ""
+            types = _field_types(db, m, True, cache) if is_field else []
+            # show what a wrapper holds: links[] : Link rather than links[] : vector
+            shown = None
+            if is_field and m.type in _WRAPPERS:
+                shown = ", ".join(t.name for t in types) if types else _declared_type(m)
+            child = TreeNode(m, level + 1, DOWN, call_line=m.line, call_file=m.file_id, rel="member",
+                             via=_member_text(m, mult, shown))
+            node.children.append(child)
+            for t in types:
+                if t.id in path:
+                    child.recursive = True
+                elif t.id in expanded:            # the same type was expanded elsewhere
+                    child.repeated = bool(members(t))
+                else:
+                    expanded.add(t.id)
+                    expand(child, t, path | {t.id}, level + 1, expanded)
+
+    if descendants:
+        expand(root, entity, {entity.id}, 0, {entity.id})
+        tree.down, root.children = root.children, []
+    if ancestors:
+        up = [(e, l, f, "inherit", "") for e, l, f in _bases(db, entity.id, hide_unresolved)]
+        up += [(e, l, f, "compose", via) for e, l, f, via in _owners(db, entity)]
+        tree.up = [TreeNode(e, -1, UP, call_line=l, call_file=f, rel=rel, via=via) for e, l, f, rel, via in up]
+    return tree
+
+
 # ---- modification trees ------------------------------------------------------------------------
 
 SCOPE_NODE_KINDS = M.FUNCTION_KINDS | {M.FILE}       # module level code (Python scripts) can call too
@@ -506,7 +591,7 @@ def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2
     """
     root = TreeNode(entity, 0)
     if member is not None:
-        root.rel, root.via = "member", member.name
+        root.rel, root.via = "target", member.name
     tree = CallTree(root, kind="modify")
     fields = [member] if member is not None else modifiable_fields(db, entity)
     writes = {}                     # function id -> [(line, col, field, file, label, whole)]
@@ -751,6 +836,13 @@ def layout_call_tree(tree: CallTree, measure=default_measure, level_gap=56.0, si
 
 
 def _display(n: TreeNode):
+    if n.rel == "member":
+        label = n.via
+        if n.recursive:
+            return label + "  ↻"
+        if n.repeated:
+            return label + "  …"
+        return label + ("  ▸" if n.truncated and not n.children else "")
     if n.rel == "write":
         parts = []
         for verb, is_whole in (("sets", False), ("replaces", True)):
@@ -762,7 +854,7 @@ def _display(n: TreeNode):
             text += f"  ({_line_list([line for _, line, _ in n.writes])})"
         return text
     label = n.label
-    if n.rel == "member":
+    if n.rel == "target":                 # modification tree of one member: Class::member
         label += ("::" if n.entity.lang in ("c", "cpp") else ".") + n.via
     if n.rel == "compose" and n.via:
         label = f"{n.via} : {label}" if n.side == DOWN else f"{label}.{n.via}"
@@ -830,6 +922,7 @@ NODE_COLORS = {
     "unresolved": ("#f6f6f6", "#666666", "#9a9a9a"),
     "scope": ("#eef1f4", "#1f2328", "#6b7280"),
     "write": ("#ffebe9", "#1f2328", "#cf222e"),
+    "field": ("#f4f0fd", "#1f2328", "#8250df"),
 }
 
 
@@ -839,6 +932,8 @@ def node_category(n: TreeNode):
         return "root"
     if n.rel == "write":
         return "write"
+    if k in (M.FIELD, M.PROPERTY):
+        return "field"
     if k in M.UNRESOLVED_KINDS:
         return "unresolved"
     if k in (M.METHOD, M.CONSTRUCTOR):
@@ -873,7 +968,7 @@ def to_svg(tree: CallTree, title=""):
         entry = tree.kind == "modify" and parent.depth == 0      # root -> entry point: not a call
         dash = ' stroke-dasharray="4,3"' if child.entity.is_unresolved or entry else ""
         if tree.kind == "class":
-            marker = 'marker-start="url(#dia)"' if child.rel == "compose" else 'marker-start="url(#tri)"'
+            marker = {"compose": 'marker-start="url(#dia)"', "inherit": 'marker-start="url(#tri)"'}.get(child.rel, "")
         else:
             marker = "" if entry else 'marker-end="url(#ah)"'
         out.append(f'<path d="{path_d(connector(parent, child, side))}" fill="none" stroke="#8b949e" '
@@ -922,6 +1017,7 @@ def to_text(tree: CallTree):
         up_title, down_title = {
             "inherit": ("Base classes (ancestors):", "Derived classes (descendants):"),
             "compose": ("Contained in (ancestors):", "Member types (descendants):"),
+            "members": ("Direct base classes and containers (ancestors):", "Members (descendants):"),
         }.get(tree.relation, ("Base classes and containers (ancestors):",
                               "Member types and derived classes (descendants):"))
     elif tree.kind == "modify":

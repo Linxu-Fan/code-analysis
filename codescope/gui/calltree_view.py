@@ -156,6 +156,8 @@ class TreeCanvas(QGraphicsView):
             sc.addItem(item)
             if entry:
                 continue
+            if tree.kind == "class" and child.rel == "member":
+                continue                               # member lists: plain connectors
             ah = QPainterPath()
             if tree.kind == "class" and child.rel == "compose":
                 # UML composition: filled diamond at the containing class (path start)
@@ -273,11 +275,13 @@ class CallTreePanel(QWidget):
         self.members.setToolTip("List fields and methods inside each class, UML style")
         self.relation = QComboBox()
         for text, key in (("Inheritance + Composition", "both"), ("Inheritance", "inherit"),
-                          ("Composition", "compose")):
+                          ("Composition", "compose"), ("Members (data + functions)", "members")):
             self.relation.addItem(text, key)
         self.relation.setToolTip("Inheritance: base and derived classes.\n"
                                  "Composition: the types of the data members, and the classes that "
-                                 "hold this one as a member.")
+                                 "hold this one as a member.\n"
+                                 "Members: every data member and member function; data members of project "
+                                 "types expand into their own members. Only direct ancestors are shown.")
         self.member = QComboBox()
         self.member.setMinimumWidth(150)
         self.member.setToolTip("Only the writes of this member (inherited members included)")
@@ -343,7 +347,7 @@ class CallTreePanel(QWidget):
             w.toggled.connect(self.rebuild)
         self.member.currentIndexChanged.connect(self.rebuild)
         self.depth.valueChanged.connect(self.rebuild)
-        self.relation.currentIndexChanged.connect(self.rebuild)
+        self.relation.currentIndexChanged.connect(self._relation_changed)
         self.canvas.nodeClicked.connect(lambda n: self.entitySelected.emit(n.entity.id))
         self.canvas.nodeActivated.connect(self._activate)
         self.canvas.nodeMenu.connect(self._menu)
@@ -401,6 +405,9 @@ class CallTreePanel(QWidget):
         if self.mode == "call":
             tree = CT.build_call_tree(self.db, self.entity, self.down.isChecked(), self.up.isChecked(),
                                       self.depth.value(), self.hide_unres.isChecked(), self.expand.isChecked())
+        elif self.relation.currentData() == "members":
+            tree = CT.build_member_tree(self.db, self.entity, self.down.isChecked(), self.up.isChecked(),
+                                        self.depth.value(), self.hide_unres.isChecked())
         else:
             tree = CT.build_class_tree(self.db, self.entity, self.down.isChecked(), self.up.isChecked(),
                                        self.depth.value(), self.hide_unres.isChecked(), self.members.isChecked(),
@@ -416,6 +423,8 @@ class CallTreePanel(QWidget):
             up_n, down_n = "base class", "derived class"
         elif rel == "compose":
             up_n, down_n = "container", "member type"
+        elif rel == "members":
+            up_n, down_n = "direct base/container", "member"
         else:
             up_n, down_n = "base/container", "member/derived"
         parts = []
@@ -424,11 +433,24 @@ class CallTreePanel(QWidget):
         if self.down.isChecked():
             parts.append(f"{n_down} {down_n} nodes")
         note = "  ·  node limit reached, reduce the depth" if tree.truncated_nodes else ""
-        legend = ("↻ recursion   … shown elsewhere   ▸ depth limit" if self.mode == "call"
-                  else "… shown elsewhere   ▸ depth limit   △ base class   ◆ owner of a member   "
-                       "name[] container  name* pointer  name? optional")
+        if self.mode == "call":
+            legend = "↻ recursion   … shown elsewhere   ▸ depth limit"
+        elif rel == "members":
+            legend = ("+ public  - private  # protected   name() member function   name[] container  "
+                      "name* pointer  name? optional   … type expanded elsewhere   ▸ depth limit")
+        else:
+            legend = ("… shown elsewhere   ▸ depth limit   △ base class   ◆ owner of a member   "
+                      "name[] container  name* pointer  name? optional")
         self.info.setText(f"{self.entity.longname}: " + ", ".join(parts) + note + "   ·   " + legend +
                           "   ·   double-click opens code, right-click for more")
+
+    def _relation_changed(self):
+        members = self.relation.currentData() == "members"
+        self.members.setVisible(not members)               # every member is a node already
+        self.depth.blockSignals(True)
+        self.depth.setValue(3 if members else 6)            # member lists grow quickly with depth
+        self.depth.blockSignals(False)
+        self.rebuild()
 
     def _rebuild_modify(self):
         mid = self.member.currentData()
@@ -490,7 +512,7 @@ class CallTreePanel(QWidget):
         if node.call_file and node.call_line and self.mode in ("call", "modify") and node.rel != "write":
             m.addAction(f"Go to Call Site (line {node.call_line})",
                         lambda: self.locationActivated.emit(node.call_file, node.call_line))
-        if node.call_file and node.call_line and self.mode == "class":
+        if node.call_file and node.call_line and self.mode == "class" and node.rel != "member":
             what = "Member Declaration" if node.rel == "compose" else "Inheritance Declaration"
             m.addAction(f"Go to {what} (line {node.call_line})",
                         lambda: self.locationActivated.emit(node.call_file, node.call_line))

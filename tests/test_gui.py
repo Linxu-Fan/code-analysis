@@ -83,6 +83,9 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     assert cls_panel.mode == "class" and {n.entity.name for n in cls_panel.tree.down} == {"Circle", "Rect"}
     cls_panel.members.setChecked(True)
     assert cls_panel.tree.root.members
+    cls_panel.relation.setCurrentIndex(cls_panel.relation.findData("members"))
+    assert cls_panel.tree.relation == "members" and cls_panel.depth.value() == 3
+    assert any(n.entity.kind == "Method" for n in cls_panel.tree.down) and cls_panel.members.isHidden()
     rect = next(e for e in win.db.entities(name="Rect") if e.kind == "Class")
     win.open_modify_tree(rect)
     mod = win.tabs.currentWidget()

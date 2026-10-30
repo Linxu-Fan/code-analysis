@@ -311,15 +311,20 @@ def cmd_calltree(a):
 
 
 def cmd_classtree(a):
-    from .core.calltree import build_class_tree, to_svg, to_text
+    from .core.calltree import build_class_tree, build_member_tree, to_svg, to_text
     db = _open(a.db)
     classes = [e for e in _find(db, a.name) if e.kind in M.CLASS_KINDS]
     if not classes:
         sys.exit(f"error: '{a.name}' is not a class or struct")
     e = classes[0]
     both = not a.down and not a.up
-    tree = build_class_tree(db, e, descendants=a.down or both, ancestors=a.up or both, depth=a.depth,
-                            hide_unresolved=a.hide_unresolved, members=a.members, relation=a.relation)
+    if a.relation == "members":
+        tree = build_member_tree(db, e, descendants=a.down or both, ancestors=a.up or both,
+                                 depth=a.depth if a.depth is not None else 3, hide_unresolved=a.hide_unresolved)
+    else:
+        tree = build_class_tree(db, e, descendants=a.down or both, ancestors=a.up or both,
+                                depth=a.depth if a.depth is not None else 6, hide_unresolved=a.hide_unresolved,
+                                members=a.members, relation=a.relation)
     if a.out and a.out.lower().endswith(".svg"):
         with open(a.out, "w", encoding="utf-8") as fh:
             fh.write(to_svg(tree, f"Class tree: {e.longname}"))
@@ -475,9 +480,10 @@ def build_parser():
     s.add_argument("--down", action="store_true", help="descendants: member types and derived classes")
     s.add_argument("--up", action="store_true", help="ancestors: base classes and containing classes "
                    "(default: both directions)")
-    s.add_argument("-r", "--relation", choices=("both", "inherit", "compose"), default="both",
-                   help="inheritance, composition (data members) or both (default)")
-    s.add_argument("-d", "--depth", type=int, default=6)
+    s.add_argument("-r", "--relation", choices=("both", "inherit", "compose", "members"), default="both",
+                   help="inheritance, composition (data members) or both (default); 'members' lists every data "
+                        "and function member, expanding member types, with only the direct ancestors")
+    s.add_argument("-d", "--depth", type=int, help="levels to show (default 6, or 3 for -r members)")
     s.add_argument("--members", action="store_true", help="list fields and methods (UML style, SVG output)")
     s.add_argument("--hide-unresolved", action="store_true", help="hide types defined outside the project")
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
