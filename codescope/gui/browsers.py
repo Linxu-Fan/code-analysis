@@ -249,9 +249,22 @@ class InfoBrowser(QTreeWidget):
         super().__init__(parent)
         self.db = None
         self.entity = None
-        self.setHeaderHidden(True)
         self.setFrameShape(QTreeWidget.NoFrame)
         self.setColumnCount(2)
+        self.setHeaderLabels(["Name", "Details"])
+        hdr = self.header()
+        hdr.setSectionResizeMode(0, QHeaderView.Interactive)
+        # details keep their full width; a horizontal scroll bar appears when the panel is narrow
+        hdr.setSectionResizeMode(1, QHeaderView.Interactive)
+        hdr.setStretchLastSection(False)
+        hdr.setMinimumSectionSize(60)
+        hdr.setSectionsMovable(False)
+        hdr.setToolTip("Drag the divider to resize the columns; double-click it to fit the names")
+        hdr.sectionResized.connect(self._section_resized)
+        hdr.sectionHandleDoubleClicked.connect(self._fit_names)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._user_width = None          # name column width chosen by dragging the divider
+        self._sizing = False
         self.setIndentation(14)
         self.setUniformRowHeights(False)
         self.setRootIsDecorated(True)
@@ -382,9 +395,38 @@ class InfoBrowser(QTreeWidget):
                 it = self._item(sec, k, value=fmt_value(m[k]), tip=METRIC_DESCRIPTIONS.get(k, ""))
                 it.setForeground(1, QColor(self.palette().color(self.palette().ColorRole.Text)))
             sec.setExpanded(e.kind in M.FUNCTION_KINDS)
-        self.resizeColumnToContents(0)
-        self.setColumnWidth(0, min(max(self.columnWidth(0), 110), 180))
+        self._auto_width()
         self.setUpdatesEnabled(True)
+
+    # ---- column sizing ---------------------------------------------------------------------
+    def _section_resized(self, index, old, new):
+        if index == 0 and not self._sizing:
+            self._user_width = new
+
+    def _set_name_width(self, w):
+        self._sizing = True
+        self.setColumnWidth(0, int(w))
+        self._sizing = False
+
+    def _auto_width(self):
+        """Fit the name column to its content (up to about half the panel) unless the user sized it."""
+        self.resizeColumnToContents(1)
+        self.setColumnWidth(1, self.columnWidth(1) + 12)
+        if self._user_width is not None:
+            self._set_name_width(self._user_width)
+            return
+        self._sizing = True
+        self.resizeColumnToContents(0)
+        self._sizing = False
+        limit = max(160, int(self.viewport().width() * 0.55))
+        self._set_name_width(min(max(self.columnWidth(0), 120), limit))
+
+    def _fit_names(self, index):
+        if index == 0:
+            self._sizing = True
+            self.resizeColumnToContents(0)
+            self._sizing = False
+            self._user_width = self.columnWidth(0)
 
     def _expand(self, item):
         data = item.data(0, ROLE_LOADED)
@@ -407,10 +449,11 @@ class InfoBrowser(QTreeWidget):
             return
         for x in data[: self.MAX_ITEMS]:
             loc = self._loc(x.file_id, x.line) if x.file_id else "unresolved"
-            self._item(item, x.name if x.kind != M.FILE else x.longname, x.id, x.file_id, x.line,
+            self._item(item, x.name, x.id, x.file_id, x.line,
                        x.kind, tip=f"{x.kind}: {x.longname}", value=loc)
         if len(data) > self.MAX_ITEMS:
             self._item(item, f"\u2026 {len(data) - self.MAX_ITEMS} more")
+        self._auto_width()
 
     def _clicked(self, item, col):
         # selecting an item only highlights it; double click navigates, context menu offers more

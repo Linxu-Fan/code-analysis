@@ -53,6 +53,10 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     assert isinstance(pane, EditorPane)
     assert pane.editor.textCursor().blockNumber() + 1 == main.line
     assert win.info.topLevelItem(0).text(0) == "main"
+    assert not win.info.isHeaderHidden()
+    win.info.header().resizeSection(0, 260)            # dragging the column divider
+    win.info.show_entity(main.id)
+    assert win.info.columnWidth(0) == 260
     # ctrl+click style navigation from a call site to the definition
     text = open(win.db.file(main.file_id).path).read().split("\n")
     line = next(i for i, l in enumerate(text, 1) if "classify(argc)" in l)
