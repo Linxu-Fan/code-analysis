@@ -181,3 +181,47 @@ def test_dependency_graphs_stay_readable(all_db):
     assert len(g.edges) <= max(3 * len(g.nodes), 20)
     g = file_dependency_graph(all_db, max_nodes=3)
     assert len(g.nodes) <= 3
+
+
+def test_call_tree(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_call_tree, layout_call_tree, to_svg, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "a.c").write_text(
+        "int leaf(void) { return 1; }\n"
+        "int mid(int n) { return n ? mid(n - 1) : leaf(); }\n"
+        "int other(void) { return leaf(); }\n"
+        "int top(void) { int x = mid(3); x += other(); x += leaf(); return x + mid(1); }\n"
+        "int main(void) { return top() + other(); }\n")
+    db = create_project(str(tmp_path / "t.csdb"), "t", [str(src)])
+    Analyzer(db).analyze()
+    top = one(db, "top")
+    t = build_call_tree(db, top, descendants=True, ancestors=True, depth=5)
+    # callees in source order, each distinct callee once per parent
+    assert [c.entity.name for c in t.down] == ["mid", "other", "leaf"]
+    mid = t.down[0]
+    assert [c.entity.name for c in mid.children] == ["mid", "leaf"]
+    assert mid.children[0].recursive                     # mid calls itself
+    assert t.down[1].children[0].entity.name == "leaf"
+    assert [c.entity.name for c in t.up] == ["main"]
+    assert t.up[0].depth == -1 and t.down[0].depth == 1
+    # depth limit marks truncation
+    t1 = build_call_tree(db, one(db, "main"), depth=1)
+    assert {c.entity.name for c in t1.down} == {"top", "other"} and any(c.truncated for c in t1.down)
+    # layout: no overlaps within a column, parents centred on their children, ancestors on the left
+    layout_call_tree(t)
+    cols = {}
+    for n in t.nodes():
+        cols.setdefault(n.depth, []).append(n)
+    for col in cols.values():
+        col.sort(key=lambda n: n.y)
+        for a, b in zip(col, col[1:]):
+            assert a.y + a.height / 2 <= b.y - b.height / 2 + 0.01
+    assert t.up[0].x < t.root.x < t.down[0].x
+    assert abs(mid.y - (mid.children[0].y + mid.children[-1].y) / 2) < 0.01
+    svg = to_svg(t, "tree")
+    assert svg.startswith("<svg") and svg.count("<rect") == t.size + 1
+    txt = to_text(t)
+    assert "mid  ↻" in txt and "← main" in txt
+    db.close()

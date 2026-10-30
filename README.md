@@ -21,6 +21,7 @@ click away (moon icon, or **View → Dark Theme**).
 | **Information browser** | Every relationship of the selected entity: definition and declarations, members, calls / called-by, uses / used-by, base / derived classes, includes, all references, and metrics. |
 | **Code editor** | Visual Studio 2022 look: VS Light / VS Dark colour schemes, Cascadia Mono / Consolas, teal line numbers, framed current line and dotted indent guides. Highlighting uses tree-sitter plus semantic colouring from the analysis (types, functions, macros and enumerators coloured by what they resolve to). Ctrl+wheel zoom, configurable font. Also: line numbers, find bar, highlighting of every occurrence of the selected entity, Ctrl+click / F12 *go to definition*, back/forward navigation, context menus with graphs, editing and saving. |
 | **Graphs** | Call tree, called-by tree, butterfly, inheritance, UML class diagram, include / included-by, file dependencies, architecture (directory dependencies) and **control flow graphs**. All are interactive: click a node to highlight its connections, double-click to open source, find nodes by name, zoom, and change the depth or folder level. Large dependency graphs show only their strongest edges, drawn thicker by weight. Graphs export to PNG, SVG or Graphviz DOT. |
+| **Call trees** | **Graphs → Call Tree** (Ctrl+Shift+T): pick a function and tick **Descendants** (what it calls), **Ancestors** (what calls it) or both. Every call path becomes its own branch with callees in source order, recursion (↻) and repeated subtrees (…) marked, and a depth limit (▸). A tidy layout puts callers on the left and callees on the right, joined by orthogonal connectors. Double-click to open code, right-click for the call site, re-rooting or collapsing a branch. Exports to SVG, PNG or indented text (`codescope calltree`). |
 | **Metrics** | Lines (code, comment, blank), comment ratio, McCabe cyclomatic complexity, max nesting, statements, parameters, fan-in/fan-out, Halstead volume/difficulty/effort, maintainability index, and for classes WMC, DIT, NOC, CBO and LCOM. Shown in a sortable metrics browser, a treemap, and exported as CSV. |
 | **Dependency analysis** | Dependency structure matrix (DSM) at directory or file level, with dependency cycles highlighted. |
 | **CodeCheck** | 30 configurable rules: complexity and size thresholds, OO design, dead code (uncalled functions, unused globals, parameters and locals), naming conventions, risky constructs (`goto`, empty handlers, bare `except`, assignment in conditions, missing `default`, mutable default arguments, …), style and documentation. |
@@ -33,6 +34,7 @@ click away (moon icon, or **View → Dark Theme**).
 | ![Call graph](docs/screenshots/03_calls.png) | ![UML](docs/screenshots/04_uml.png) |
 | ![Control flow](docs/screenshots/05_cfg.png) | ![Treemap](docs/screenshots/07_treemap.png) |
 | ![CodeCheck](docs/screenshots/09_codecheck.png) | ![Dependency matrix](docs/screenshots/08_dsm.png) |
+| ![Call tree](docs/screenshots/12_calltree.png) | ![Call tree SVG export](docs/screenshots/12_calltree_svg.png) |
 | ![Start page](docs/screenshots/00_welcome.png) | ![Project overview](docs/screenshots/01_overview.png) |
 
 ## Installing on Windows
@@ -123,6 +125,7 @@ codescope check   proj.csdb [--rules "DEAD-*" CMPLX-01] [-t CMPLX-01=10] [-f tex
 codescope check   --list-rules
 codescope graph   proj.csdb main -t calls|callby|butterfly|inheritance|uml|includes|control -o main.svg
 codescope graph   proj.csdb -t architecture -o arch.dot
+codescope calltree proj.csdb geo::Shape::describe --down --up -d 4 -o tree.svg   (or print as text)
 codescope report  proj.csdb -o report/
 codescope gui     [proj.csdb]
 ```

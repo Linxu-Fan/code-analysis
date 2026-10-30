@@ -288,6 +288,28 @@ def cmd_graph(a):
         print(out)
 
 
+def cmd_calltree(a):
+    from .core.calltree import build_call_tree, to_svg, to_text
+    db = _open(a.db)
+    funcs = [e for e in _find(db, a.name) if e.kind in M.FUNCTION_KINDS]
+    if not funcs:
+        sys.exit(f"error: '{a.name}' is not a function")
+    e = funcs[0]
+    down = a.down or not a.up
+    tree = build_call_tree(db, e, descendants=down, ancestors=a.up, depth=a.depth,
+                           hide_unresolved=a.hide_unresolved, expand_repeated=a.repeat)
+    if a.out and a.out.lower().endswith(".svg"):
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_svg(tree, f"Call tree: {e.longname}"))
+        print(f"Wrote {a.out} ({tree.size} nodes)")
+    elif a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_text(tree))
+        print(f"Wrote {a.out} ({tree.size} nodes)")
+    else:
+        print(to_text(tree))
+
+
 def cmd_gui(a):
     from .gui.app import main as gui_main
     return gui_main([a.db] if a.db else [])
@@ -385,6 +407,17 @@ def build_parser():
     s.add_argument("--hide-unresolved", action="store_true")
     s.add_argument("--lr", action="store_true", help="left-to-right layout")
     s.set_defaults(fn=cmd_graph)
+
+    s = sub.add_parser("calltree", help="callers (--up) and/or callees (--down) of a function as a tree")
+    s.add_argument("db")
+    s.add_argument("name", help="function name or qualified name")
+    s.add_argument("--down", action="store_true", help="descendants: what the function calls (default)")
+    s.add_argument("--up", action="store_true", help="ancestors: what calls the function")
+    s.add_argument("-d", "--depth", type=int, default=4)
+    s.add_argument("--hide-unresolved", action="store_true", help="hide calls into code outside the project")
+    s.add_argument("--repeat", action="store_true", help="expand repeated subtrees every time")
+    s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
+    s.set_defaults(fn=cmd_calltree)
 
     s = sub.add_parser("gui", help="open the graphical interface")
     s.add_argument("db", nargs="?")

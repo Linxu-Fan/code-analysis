@@ -62,6 +62,17 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
         win.open_graph(kind, main.id)
         assert isinstance(win.tabs.currentWidget(), GraphPanel)
         assert win.tabs.currentWidget().graph.nodes
+    from codescope.gui.calltree_view import CallTreePanel
+    win.open_call_tree(main)
+    ct = win.tabs.currentWidget()
+    assert isinstance(ct, CallTreePanel) and ct.tree is not None and ct.tree.down
+    ct.up.setChecked(True)
+    ct.down.setChecked(False)
+    assert not ct.tree.down
+    classify = next(e for e in win.db.entities(name="classify"))
+    ct._picked(classify.longname)
+    assert ct.entity.id == classify.id and [n.entity.name for n in ct.tree.up] == ["main"]
+    ct._collapse(ct.tree.up[0], True)
     win.open_graph("architecture", None)
     panel = win.tabs.currentWidget()
     some = next(iter(panel.canvas.node_items))

@@ -284,6 +284,8 @@ class MainWindow(QMainWindow):
         self.a_arch = self._act("&Architecture Graph", lambda: self.open_graph("architecture", None),
                                 icon="architecture")
         self.a_uml = self._act("Project &UML Class Diagram", lambda: self.open_graph("uml", None), icon="uml")
+        self.a_calltree = self._act("Call &Tree\u2026", lambda: self.open_call_tree(self._current_function()),
+                                    "Ctrl+Shift+T", tip="Callers and/or callees of a function as a tree", icon="calls")
         self.a_codecheck = self._act("&CodeCheck\u2026", self.open_codecheck, "Ctrl+Shift+K", icon="check")
         self.a_report = self._act("&HTML Report\u2026", self.html_report, icon="report")
         self.a_dark = self._act("&Dark Theme", self.toggle_theme, icon="theme")
@@ -371,7 +373,7 @@ class MainWindow(QMainWindow):
         self.graph_btn.setMenu(gm)
         self._themed.append((self.graph_btn, "graph"))
         tb.addWidget(self.graph_btn)
-        for a in (self.a_arch, self.a_uml, None, self.a_metrics, self.a_treemap, self.a_dsm, None,
+        for a in (self.a_calltree, self.a_arch, self.a_uml, None, self.a_metrics, self.a_treemap, self.a_dsm, None,
                   self.a_codecheck, self.a_report):
             tb.addSeparator() if a is None else tb.addAction(a)
         spacer = QWidget()
@@ -413,7 +415,7 @@ class MainWindow(QMainWindow):
         busy = self.worker is not None
         for a in (self.a_close, self.a_config, self.a_analyze, self.a_full, self.a_overview, self.a_find,
                   self.a_metrics, self.a_treemap, self.a_dsm, self.a_export_metrics, self.a_arch, self.a_uml,
-                  self.a_codecheck, self.a_report, self.a_find_entity):
+                  self.a_codecheck, self.a_report, self.a_find_entity, self.a_calltree):
             a.setEnabled(has and not (busy and a in (self.a_analyze, self.a_full, self.a_config)))
         self.graph_btn.setEnabled(has)
         self.quick.setEnabled(has)
@@ -892,6 +894,8 @@ class MainWindow(QMainWindow):
             m.addAction(f"Go to Declaration ({self.db.location(d)})",
                         lambda d=d: self.open_location(d.file_id, d.line, d.col))
         m.addSeparator()
+        if e.kind in M.FUNCTION_KINDS:
+            m.addAction(theme.icon("calls"), "Call Tree\u2026", lambda: self.open_call_tree(e))
         g = m.addMenu(theme.icon("graph"), "Graphs")
         for kind in graphs_for(e):
             g.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
@@ -908,11 +912,26 @@ class MainWindow(QMainWindow):
         self._fill_entity_menu(m, e)
         m.exec(gpos)
 
+    def _current_function(self):
+        e = self.db.entity(self.current_entity) if (self.db and self.current_entity) else None
+        return e if e is not None and e.kind in M.FUNCTION_KINDS else None
+
+    def open_call_tree(self, entity=None):
+        from .calltree_view import CallTreePanel
+        if self.db is None:
+            return
+        panel = CallTreePanel(self.db, entity)
+        self.add_tab(panel, panel.title, connect=True, icon="calls")
+        if entity is None:
+            panel.picker.setFocus()
+
     def _info_graph_menu(self):
         if not self.current_entity:
             return
         e = self.db.entity(self.current_entity)
         m = QMenu(self)
+        if e.kind in M.FUNCTION_KINDS:
+            m.addAction(theme.icon("calls"), "Call Tree\u2026", lambda: self.open_call_tree(e))
         for kind in graphs_for(e):
             m.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
                         lambda k=kind: self.open_graph(k, e.id))
@@ -927,6 +946,8 @@ class MainWindow(QMainWindow):
         e = self.db.entity(self.current_entity) if (self.db and self.current_entity) else None
         if e is not None:
             m.addSection(f"{e.name}")
+            if e.kind in M.FUNCTION_KINDS:
+                m.addAction(theme.icon("calls"), "Call Tree\u2026", lambda: self.open_call_tree(e))
             for kind in graphs_for(e):
                 m.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
                             lambda k=kind: self.open_graph(k, e.id))
@@ -934,6 +955,7 @@ class MainWindow(QMainWindow):
         else:
             a = m.addAction("(select an entity for entity graphs)")
             a.setEnabled(False)
+        m.addAction(self.a_calltree)
         m.addAction(self.a_arch)
         m.addAction(self.a_uml)
 

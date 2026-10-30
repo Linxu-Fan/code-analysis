@@ -66,6 +66,12 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert main(["graph", db, "main", "-t", "calls", "-o", svg]) == 0
     assert open(svg, encoding="utf-8").read().startswith("<svg")
     capsys.readouterr()
+    svg2 = str(tmp_path / "tree.svg")
+    assert main(["calltree", db, "main", "--down", "--up", "-o", svg2]) == 0
+    assert open(svg2, encoding="utf-8").read().startswith("<svg")
+    capsys.readouterr()
+    assert main(["calltree", db, "classify", "--up"]) == 0
+    assert "\u2190 main" in capsys.readouterr().out
     assert main(["metrics", db, "--project"]) == 0
     assert json.loads(capsys.readouterr().out)["Files"] == 5
     assert main(["report", db, "-o", str(tmp_path / "r"), "-q"]) == 0
