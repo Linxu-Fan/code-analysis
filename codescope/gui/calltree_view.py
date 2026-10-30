@@ -437,7 +437,7 @@ class CallTreePanel(QWidget):
             legend = "↻ recursion   … shown elsewhere   ▸ more levels (right-click to expand)"
         elif rel == "members":
             legend = ("+ public  - private  # protected   name() member function   name[] container  "
-                      "name* pointer  name? optional   … type expanded elsewhere   ▸ depth limit")
+                      "name* pointer  name? optional   … type expanded elsewhere   ▸ more (right-click to expand)")
         else:
             legend = ("… shown elsewhere   ▸ more (right-click to expand)   △ base class   ◆ owner of a member   "
                       "name[] container  name* pointer  name? optional")
