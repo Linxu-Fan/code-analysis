@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
@@ -238,6 +239,13 @@ class MainWindow(QMainWindow):
         iv.addWidget(self.info)
         self.dock_info = self._dock("Information Browser", info_box, Qt.RightDockWidgetArea, "dock_info")
         self.dock_find = self._dock("Find in Files", self.find_panel, Qt.BottomDockWidgetArea, "dock_find")
+        from .ai_panel import AIPanel
+        self.ai_panel = AIPanel()
+        self.ai_panel.locationActivated.connect(lambda fid, line: self.open_location(fid, line))
+        self.dock_ai = self._dock("AI Assistant", self._sized(self.ai_panel, 440), Qt.RightDockWidgetArea, "dock_ai")
+        self.tabifyDockWidget(self.dock_info, self.dock_ai)
+        self.dock_info.raise_()
+        self.dock_ai.hide()
         self.dock_find.hide()
         for w in (self.project_tree, self.entity_filter, self.info):
             w.entitySelected.connect(self.show_entity)
@@ -294,6 +302,12 @@ class MainWindow(QMainWindow):
                                    "is modified", icon="modify")
         self.a_codecheck = self._act("&CodeCheck\u2026", self.open_codecheck, "Ctrl+Shift+K", icon="check")
         self.a_report = self._act("&HTML Report\u2026", self.html_report, icon="report")
+        self.a_ai = self._act("AI &Assistant", self.show_ai, "Ctrl+Shift+A",
+                              tip="Ask a local AI model about the code", icon="ai")
+        self.a_ai_entity = self._act("Ask AI About Current Entity", self._ask_ai_current)
+        self.a_ai_settings = self._act("AI &Settings\u2026", lambda: (self.show_ai(), self.ai_panel.edit_settings()))
+        self.a_ai_setup = self._act("Set &Up Local Model\u2026", lambda: (self.show_ai(), self.ai_panel.setup()))
+        self.a_ai_help = self._act("AI Setup &Guide", self.ai_setup_guide)
         self.a_dark = self._act("&Dark Theme", self.toggle_theme, icon="theme")
         self.a_dark.setCheckable(True)
         self.a_about = self._act("&About", self.about)
@@ -326,6 +340,9 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_codecheck)
         m = mb.addMenu("&Reports")
         m.addAction(self.a_report)
+        m = mb.addMenu("A&I")
+        for a in (self.a_ai, self.a_ai_entity, None, self.a_ai_setup, self.a_ai_settings, self.a_ai_help):
+            m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&View")
         m.addAction(self.a_dark)
         sm = m.addMenu("Editor Color Scheme")
@@ -380,7 +397,7 @@ class MainWindow(QMainWindow):
         self._themed.append((self.graph_btn, "graph"))
         tb.addWidget(self.graph_btn)
         for a in (self.a_calltree, self.a_classtree, self.a_modtree, self.a_arch, self.a_uml, None, self.a_metrics, self.a_treemap, self.a_dsm, None,
-                  self.a_codecheck, self.a_report):
+                  self.a_codecheck, self.a_report, None, self.a_ai):
             tb.addSeparator() if a is None else tb.addAction(a)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -410,9 +427,12 @@ class MainWindow(QMainWindow):
             self.addDockWidget(area, d)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_entities)
         self.tabifyDockWidget(self.dock_project, self.dock_entities)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_ai)
+        self.tabifyDockWidget(self.dock_info, self.dock_ai)
         for d in (self.dock_project, self.dock_entities, self.dock_info):
             d.show()
         self.dock_find.hide()
+        self.dock_ai.hide()
         self.dock_project.raise_()
         self.resizeDocks([self.dock_project, self.dock_info], [300, 360], Qt.Horizontal)
 
@@ -486,6 +506,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{self.db.config().get('name')} — {APP_NAME}")
         self.info.set_db(self.db)
         self.find_panel.set_db(self.db)
+        self.ai_panel.set_db(self.db)
         self._update_actions()
         if analyze or self.db.get_meta("linked") != "1":
             self.analyze(False)
@@ -511,7 +532,7 @@ class MainWindow(QMainWindow):
         self.nav_fwd.clear()
         self.info_back.clear()
         self.info_fwd.clear()
-        for w in (self.project_tree, self.entity_filter, self.info, self.find_panel):
+        for w in (self.project_tree, self.entity_filter, self.info, self.find_panel, self.ai_panel):
             w.set_db(None)
         self.welcome.refresh()
         self.tabs.addTab(self.welcome, app_icon(), "Start Page")
@@ -535,6 +556,7 @@ class MainWindow(QMainWindow):
                 ed.set_semantic(self._semantic_tokens(ed.file_id), *self._type_names(refresh=True))
         self.project_tree.set_db(db)
         self.entity_filter.set_db(db)
+        self.ai_panel.refresh_files()
         names = sorted({e.longname for e in db.entities(include_locals=False) if not e.is_unresolved})
         comp = QCompleter(names, self.quick)
         comp.setCaseSensitivity(Qt.CaseInsensitive)
@@ -881,11 +903,73 @@ class MainWindow(QMainWindow):
         fe = self.db.file_entity(fid) if self.db else None
         if fe is not None:
             extra.append(self._entity_submenu(menu, fe, f"File: {fe.name}"))
+        sel = self._editor_selection()
+        if sel is not None:
+            ask = QAction(theme.icon("ai"), "Ask AI About Selection", menu)
+            ask.triggered.connect(lambda: self.ask_ai_selection(sel))
+            menu.insertAction(first, ask)
         for sub in extra:
             menu.insertMenu(first, sub)
         if first is not None:
             menu.insertSeparator(first)
         menu.exec(gpos)
+
+    # ---- AI assistant -----------------------------------------------------------------------------
+    def show_ai(self):
+        self.dock_ai.show()
+        self.dock_ai.raise_()
+        self.ai_panel.input.setFocus()
+
+    def ask_ai(self, question, context="", shown=None):
+        self.show_ai()
+        if self.ai_panel.busy():
+            self.status_label.setText("The AI assistant is still answering the previous question.")
+            return
+        self.ai_panel.ask(question, context, shown)
+
+    def ask_ai_about(self, e):
+        where = f" ({self.db.location(e)})" if e.file_id else ""
+        self.ask_ai(f"Explain the {e.kind.lower()} `{e.longname}`{where}: what it does, how it works and "
+                    "where it is used.")
+
+    def _ask_ai_current(self):
+        e = self.db.entity(self.current_entity) if (self.db and self.current_entity) else None
+        if e is None:
+            self.show_ai()
+            return
+        self.ask_ai_about(e)
+
+    def _editor_selection(self):
+        w = self.tabs.currentWidget()
+        if not isinstance(w, EditorPane) or self.db is None:
+            return None
+        c = w.editor.textCursor()
+        if not c.hasSelection():
+            return None
+        doc = w.editor.document()
+        first = doc.findBlock(c.selectionStart()).blockNumber() + 1
+        last = doc.findBlock(c.selectionEnd()).blockNumber() + 1
+        f = self.db.file(w.editor.file_id) if w.editor.file_id else None
+        text = c.selectedText().replace("\u2029", "\n")
+        return (f.relpath if f else os.path.basename(w.editor.path), first, last, text, f.lang if f else "cpp")
+
+    def ask_ai_selection(self, sel):
+        from .ai_panel import selection_context
+        rel, first, last, text, lang = sel
+        self.ask_ai("Explain this code: what it does and how it fits into the project.",
+                    selection_context(rel, first, last, text, lang),
+                    shown=f"Explain the selected code in {rel}:{first}-{last}.")
+
+    def ai_setup_guide(self):
+        here = os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__))
+        for base in (here, os.path.join(here, ".."), os.path.join(here, "..", "..")):
+            path = os.path.normpath(os.path.join(base, "docs", "AI_SETUP.md"))
+            if os.path.exists(path):
+                from .ai_panel import show_markdown
+                with open(path, encoding="utf-8") as fh:
+                    show_markdown(self, "AI Setup Guide", fh.read())
+                return
+        QDesktopServices.openUrl(QUrl("https://github.com/Linxu-Fan/code-analysis/blob/main/docs/AI_SETUP.md"))
 
     def _entity_submenu(self, parent, e, title):
         m = QMenu(title, parent)
@@ -907,6 +991,7 @@ class MainWindow(QMainWindow):
             m.addAction(theme.icon("architecture"), "Class Tree\u2026", lambda: self.open_class_tree(e))
         if e.kind in M.CLASS_KINDS or e.kind in (M.FIELD, M.PROPERTY):
             m.addAction(theme.icon("modify"), "Modification Tree\u2026", lambda: self.open_modify_tree(e))
+        m.addAction(theme.icon("ai"), "Ask AI About This", lambda: self.ask_ai_about(e))
         g = m.addMenu(theme.icon("graph"), "Graphs")
         for kind in graphs_for(e):
             g.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],

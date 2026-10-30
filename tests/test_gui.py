@@ -184,3 +184,103 @@ def test_editor_visual_studio_highlighting(app, cpp_db):
     ed.zoom_reset()
     pane.grab()
     theme.current["editor_scheme"] = "auto"
+
+
+def test_ai_panel(app, tmp_path, monkeypatch):
+    import time
+
+    from PySide6.QtCore import QSettings
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path / "settings"))
+    monkeypatch.setenv("CODESCOPE_CONFIG_DIR", str(tmp_path / "cfg"))
+    from codescope.core.analyzer import create_project
+    from codescope.gui.main_window import MainWindow
+
+    from .ai_mock import MockLLM
+    from .conftest import SAMPLES
+    path = str(tmp_path / "a.csdb")
+    create_project(path, "ai", [os.path.join(SAMPLES, "cpp")]).close()
+
+    def settle(cond, limit=20):
+        deadline = time.time() + limit
+        while not cond() and time.time() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        app.processEvents()
+
+    script = [{"tool_calls": [("describe", {"name": "geo::Rect::area"})]},
+              {"reasoning": "It multiplies.", "content": "It returns `w_ * h_`, see `src/shape.cpp:33`."}]
+    with MockLLM(script) as llm:
+        from codescope.core import assistant as A
+        A.save_settings(dict(A.DEFAULT_SETTINGS, url=llm.url))
+        win = MainWindow()
+        win.show()
+        win.open_project(path)
+        settle(lambda: win.worker is None, 60)
+        panel = win.ai_panel
+        panel.settings = A.load_settings()
+        win.show_ai()
+        assert win.dock_ai.isVisible()
+        settle(lambda: panel.online is not None)
+        assert panel.online is True
+        rect_area = next(e for e in win.db.entities(name="area") if e.longname == "geo::Rect::area")
+        win.ask_ai_about(rect_area)
+        settle(lambda: not panel.busy() and panel.turns[-1]["done"])
+        turn = panel.turns[-1]
+        assert turn["steps"] == ["describe('geo::Rect::area')"] and turn["answer"].startswith("It returns")
+        md = panel.markdown()
+        assert "geo::Rect::area" in md and "](cs:" in md      # the file reference became a link
+        opened = []
+        panel.locationActivated.connect(lambda f, l: opened.append((f, l)))
+        from PySide6.QtCore import QUrl
+        fid = win.db.file_by_path(os.path.join(SAMPLES, "cpp", "src", "shape.cpp")).id
+        assert f"(cs:{fid}:33)" in md
+        panel._link(QUrl(f"cs:{fid}:33"))
+        assert opened == [(fid, 33)]
+        panel.show_reasoning.setChecked(True)
+        assert "It multiplies." in panel.markdown()
+        panel.new_chat()
+        assert panel.turns == [] and panel.history == []
+        win.close_project()
+    # the server is gone: the panel explains how to set it up
+    panel.online = None
+    panel.check_server()
+    settle(lambda: panel.online is not None)
+    win.open_project(path)
+    settle(lambda: win.worker is None, 60)
+    panel.online = False
+    assert "Set Up" in panel.markdown()
+    win.close()
+
+
+def test_ai_setup_dialog(app, tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setenv("CODESCOPE_CONFIG_DIR", str(tmp_path / "cfg"))
+    from codescope.core import ai_setup as S
+    from codescope.gui.ai_panel import AIPanel, AISetupDialog
+
+    from .test_ai_setup import write_gguf
+    model = tmp_path / "m.gguf"
+    write_gguf(model, {"general.architecture": "qwen3moe", "qwen3moe.block_count": 4,
+                       "qwen3moe.expert_count": 8}, pad=4096)
+    server = tmp_path / "llama-server"
+    server.write_text("")
+    monkeypatch.setattr(S, "detect_hardware", lambda: {"gpus": [], "cuda": "", "ram": 8 * 1024 ** 3})
+    panel = AIPanel()
+    dlg = AISetupDialog(panel)
+    dlg.model.setText(str(model))
+    dlg.download.setChecked(False)
+    dlg.server.setText(str(server))
+    dlg.port.setValue(8099)
+    dlg._run(install=True)
+    deadline = time.time() + 20
+    while dlg.worker.isRunning() and time.time() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+    for _ in range(5):
+        app.processEvents()
+    log = dlg.log.toPlainText()
+    assert "GPU: none detected" in log and "Start script written" in log
+    assert panel.settings["url"] == "http://127.0.0.1:8099/v1" and panel.settings["model_file"] == str(model)
+    assert dlg.start_btn.isEnabled()

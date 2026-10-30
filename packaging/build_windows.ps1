@@ -170,6 +170,9 @@ if (-not (Test-Path (Join-Path $AppDir "CodeScope.exe")) -or -not (Test-Path $Cl
     Fail "PyInstaller finished but the executables are missing in $AppDir"
 }
 Invoke-Checked "Smoke test of codescope-cli.exe" { & $Cli --version }
+# user documentation next to the program (AI > AI Setup Guide opens docs\AI_SETUP.md)
+New-Item -ItemType Directory -Force -Path (Join-Path $AppDir "docs") | Out-Null
+Copy-Item (Join-Path $Root "docs\AI_SETUP.md") (Join-Path $AppDir "docs")
 Remove-Item -Recurse -Force $Work -ErrorAction SilentlyContinue
 Write-Ok "built $AppDir"
 
