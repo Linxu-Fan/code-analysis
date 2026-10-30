@@ -508,7 +508,7 @@ class _SetupWorker(QThread):
             self.log.emit(f"Start script written: {script}")
             self.done.emit({"script": script, "server": server})
         except Exception as exc:  # noqa: BLE001
-            self.log.emit(f"<b style='color:#cf222e'>Error:</b> {exc}")
+            self.log.emit(f"<b style='color:#cf222e'>Error:</b> {type(exc).__name__}: {exc}")
             self.done.emit(None)
 
 

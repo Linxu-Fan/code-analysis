@@ -111,9 +111,12 @@ def test_cli_dry_run(tmp_path, monkeypatch, capsys):
                        "qwen3moe.expert_count": 128}, pad=1024)
     monkeypatch.setattr(S, "detect_hardware", lambda: {"gpus": [{"name": "RTX", "vram": 8 * GIB, "vendor": "nvidia"}],
                                                        "cuda": "12.8", "ram": 32 * GIB})
-    monkeypatch.setattr(S, "fetch_release", lambda: RELEASE)
+    # the newest release has no Windows builds (like llama.cpp's package releases): skip it
+    monkeypatch.setattr(S, "fetch_releases", lambda: [{"tag_name": "v0.8.0", "assets": []},
+                                                       {"tag_name": "b7001", "draft": True, "assets": RELEASE["assets"]},
+                                                       RELEASE])
     assert main(["ai-setup", str(model), "--dry-run"]) in (0, None)
     out = capsys.readouterr().out
-    assert "llama-b7000-bin-win-cuda-12.4-x64.zip, cudart-llama-bin-win-cuda-12.4-x64.zip" in out
+    assert "from llama.cpp b7000: llama-b7000-bin-win-cuda-12.4-x64.zip, cudart-llama-bin-win-cuda-12.4-x64.zip" in out
     assert "llama-server -m" in out and "--jinja" in out
     assert not (tmp_path / "cfg").exists()                 # nothing written

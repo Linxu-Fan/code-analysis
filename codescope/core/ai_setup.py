@@ -18,7 +18,8 @@ import zipfile
 
 from .assistant import config_dir
 
-RELEASE_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+# not .../releases/latest: that can be a release without the Windows builds (e.g. a tagged package version)
+RELEASES_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30"
 GIB = 1024 ** 3
 HEADROOM_GIB = 2.5          # VRAM kept free for the KV cache, compute buffers and the desktop
 
@@ -183,10 +184,21 @@ def pick_assets(release, backend, cuda_version=""):
     return [(hits[0], assets[hits[0]])] if hits else []
 
 
-def fetch_release():
-    req = urllib.request.Request(RELEASE_API, headers={"User-Agent": "CodeScope", "Accept": "application/json"})
+def fetch_releases():
+    req = urllib.request.Request(RELEASES_API, headers={"User-Agent": "CodeScope", "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode("utf-8"))
+
+
+def find_release(releases, backend, cuda_version=""):
+    """The newest published release that has a Windows build for *backend*: (release, assets)."""
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        assets = pick_assets(rel, backend, cuda_version)
+        if assets:
+            return rel, assets
+    return None, []
 
 
 def download(url, dest, progress=None):
@@ -220,12 +232,12 @@ def install_llama_cpp(backend, cuda_version="", dest=None, log=print, progress=N
     """Download and unpack the latest llama.cpp Windows build; returns the llama-server path."""
     dest = dest or os.path.join(config_dir(), "llama.cpp")
     log("Looking up the latest llama.cpp release on GitHub …")
-    release = fetch_release()
+    releases = fetch_releases()
+    release, assets = find_release(releases, backend, cuda_version)
+    if release is None:
+        tags = ", ".join(r.get("tag_name", "?") for r in releases[:5])
+        raise RuntimeError(f"No recent llama.cpp release has a Windows {backend} build (checked {tags} …)")
     tag = release.get("tag_name", "latest")
-    assets = pick_assets(release, backend, cuda_version)
-    if not assets:
-        names = ", ".join(a["name"] for a in release.get("assets", []) if a["name"].endswith(".zip"))
-        raise RuntimeError(f"No Windows {backend} build in llama.cpp {tag}. Available: {names}")
     target = os.path.join(dest, f"{tag}-{backend}")
     existing = find_server(target) if os.path.isdir(target) else None
     if existing:

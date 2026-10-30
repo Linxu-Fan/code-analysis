@@ -428,12 +428,12 @@ def cmd_ai_setup(a):
     print(f"llama.cpp build: {backend}")
     if a.dry_run:
         try:
-            release = S.fetch_release()
+            releases = S.fetch_releases()
         except Exception as exc:  # noqa: BLE001
             sys.exit(f"error: cannot read the llama.cpp releases from GitHub: {exc}")
-        assets = S.pick_assets(release, backend, hw["cuda"])
-        if not assets:
-            sys.exit(f"error: llama.cpp {release.get('tag_name')} has no Windows {backend} build")
+        release, assets = S.find_release(releases, backend, hw["cuda"])
+        if release is None:
+            sys.exit(f"error: no recent llama.cpp release has a Windows {backend} build")
         print(f"Would download from llama.cpp {release.get('tag_name')}: " + ", ".join(n for n, _ in assets))
         args, notes = S.plan(info, hw, backend, a.ctx)
         for n in notes:
@@ -459,7 +459,7 @@ def cmd_ai_setup(a):
             try:
                 server = S.install_llama_cpp(backend, hw["cuda"], log=print, progress=progress)
             except Exception as exc:  # noqa: BLE001
-                sys.exit(f"error: download failed: {exc}\nDownload llama.cpp yourself from "
+                sys.exit(f"error: download failed: {type(exc).__name__}: {exc}\nDownload llama.cpp yourself from "
                          "https://github.com/ggml-org/llama.cpp/releases and pass --server PATH.")
     args, notes = S.plan(info, hw, backend, a.ctx)
     print()
