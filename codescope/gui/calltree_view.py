@@ -38,7 +38,10 @@ class TreeNodeItem(QGraphicsItem):
         tip = f"{e.kind}: {e.longname}"
         if node.rel == "compose" and node.via:
             tip += f"\nmember: {node.via}"
-        if node.call_line:
+        if node.rel == "write":
+            tip = f"Step #{node.step}: {e.kind.lower()} written\n" + "\n".join(
+                f"  {name}  (line {line})" for name, line in node.writes) + "\nDouble-click opens the write"
+        elif node.call_line:
             tip += f"\n{'declared' if view.tree is not None and view.tree.kind == 'class' else 'called'} at line {node.call_line}"
         if node.recursive:
             tip += "\n↻ recursive call (already on this path)"
@@ -143,11 +146,14 @@ class TreeCanvas(QGraphicsView):
                     path.quadTo(cmd[1], cmd[2], cmd[3], cmd[4])
             item = QGraphicsPathItem(path)
             pen = QPen(edge_color, 1.3)
-            if child.entity.is_unresolved:
+            entry = tree.kind == "modify" and parent.depth == 0      # root -> entry point: not a call
+            if child.entity.is_unresolved or entry:
                 pen.setStyle(Qt.DashLine)
             item.setPen(pen)
             item.setZValue(1)
             sc.addItem(item)
+            if entry:
+                continue
             ah = QPainterPath()
             if tree.kind == "class" and child.rel == "compose":
                 # UML composition: filled diamond at the containing class (path start)
@@ -218,18 +224,19 @@ class TreeCanvas(QGraphicsView):
 class CallTreePanel(QWidget):
     """Tool page: entity picker, direction ticks, depth, and the tree.
 
-    mode "call": callers / callees of a function.  mode "class": base / derived classes.
+    mode "call": callers / callees of a function.  mode "class": base / derived classes and
+    members.  mode "modify": the call paths to every write of a class's members, in order.
     """
     entitySelected = Signal(int)
     entityActivated = Signal(int)
     locationActivated = Signal(int, int)
 
-    def __init__(self, db, entity=None, parent=None, mode="call"):
+    def __init__(self, db, entity=None, parent=None, mode="call", member=None):
         super().__init__(parent)
         self.db = db
         self.mode = mode
         self.kinds = sorted(M.FUNCTION_KINDS) if mode == "call" else sorted(M.CLASS_KINDS)
-        self.noun = "Call Tree" if mode == "call" else "Class Tree"
+        self.noun = {"call": "Call Tree", "class": "Class Tree", "modify": "Modification Tree"}[mode]
         self.title = self.noun
         self.entity = None
         self.tree = None
@@ -240,7 +247,7 @@ class CallTreePanel(QWidget):
         self.picker = QLineEdit(placeholderText="Choose a function…" if mode == "call" else
                                 "Choose a class or struct…", clearButtonEnabled=True)
         self.picker.setMinimumWidth(280)
-        funcs = sorted({e.longname for e in db.entities(kinds=sorted(M.FUNCTION_KINDS)) if e.file_id})
+        funcs = sorted({e.longname for e in db.entities(kinds=self.kinds) if e.file_id})
         comp = QCompleter(funcs, self.picker)
         comp.setCaseSensitivity(Qt.CaseInsensitive)
         comp.setFilterMode(Qt.MatchContains)
@@ -253,7 +260,7 @@ class CallTreePanel(QWidget):
         self.down.setChecked(True)
         self.up = QCheckBox("Ancestors (callers)" if call else "Ancestors (bases && containers)")
         self.up.setChecked(not call)
-        self.depth = QSpinBox(minimum=1, maximum=20, value=4 if call else 6)
+        self.depth = QSpinBox(minimum=1, maximum=30, value={"call": 4, "class": 6, "modify": 10}[mode])
         self.depth.setFixedWidth(64)
         self.hide_unres = QCheckBox("Hide unresolved")
         self.hide_unres.setChecked(True)
@@ -269,10 +276,23 @@ class CallTreePanel(QWidget):
         self.relation.setToolTip("Inheritance: base and derived classes.\n"
                                  "Composition: the types of the data members, and the classes that "
                                  "hold this one as a member.")
+        self.member = QComboBox()
+        self.member.setMinimumWidth(150)
+        self.member.setToolTip("Only the writes of this member (inherited members included)")
+        self.paths = QCheckBox("Show call paths")
+        self.paths.setChecked(True)
+        self.paths.setToolTip("Start at the entry points (e.g. main) and follow the calls that lead to a "
+                              "modification.\nUntick to list only the functions that write the members.")
+        if mode == "modify":
+            for w in (self.down, self.up, self.hide_unres, self.expand, self.members, self.relation):
+                w.hide()
+        else:
+            self.member.hide()
+            self.paths.hide()
         if call:
             self.members.hide()
             self.relation.hide()
-        else:
+        elif mode == "class":
             self.expand.hide()
             self.hide_unres.setText("Hide external types")
             self.hide_unres.setToolTip("Hide types defined outside the project (e.g. std::exception, int, "
@@ -280,6 +300,10 @@ class CallTreePanel(QWidget):
         bar.addWidget(QLabel("Function:" if call else "Class:"))
         bar.addWidget(self.picker, 1)
         bar.addWidget(self.relation)
+        if mode == "modify":
+            bar.addWidget(QLabel("Member:"))
+        bar.addWidget(self.member)
+        bar.addWidget(self.paths)
         bar.addWidget(self.down)
         bar.addWidget(self.up)
         bar.addWidget(QLabel("Depth:"))
@@ -307,15 +331,18 @@ class CallTreePanel(QWidget):
         v.addWidget(bar_w)
         v.addWidget(self.canvas, 1)
         v.addWidget(self.info)
-        for w in (self.down, self.up, self.hide_unres, self.expand, self.members):
+        for w in (self.down, self.up, self.hide_unres, self.expand, self.members, self.paths):
             w.toggled.connect(self.rebuild)
+        self.member.currentIndexChanged.connect(self.rebuild)
         self.depth.valueChanged.connect(self.rebuild)
         self.relation.currentIndexChanged.connect(self.rebuild)
         self.canvas.nodeClicked.connect(lambda n: self.entitySelected.emit(n.entity.id))
         self.canvas.nodeActivated.connect(self._activate)
         self.canvas.nodeMenu.connect(self._menu)
         if entity is not None:
-            self.set_function(entity)
+            self.set_function(entity, member)
+        elif mode == "modify":
+            self.info.setText("Pick a class or struct, and optionally one of its members.")
         else:
             self.info.setText(f"Pick a {'function' if call else 'class or struct'}, then tick Descendants, "
                               "Ancestors or both.")
@@ -330,16 +357,34 @@ class CallTreePanel(QWidget):
         else:
             self.info.setText(f"No {'function' if self.mode == 'call' else 'class'} named '{text}'")
 
-    def set_function(self, entity):
+    def set_function(self, entity, member=None):
         self.entity = entity
         self.picker.blockSignals(True)
         self.picker.setText(entity.longname)
         self.picker.blockSignals(False)
-        self.title = f"{self.noun}: {entity.name}"
+        self.title = f"{self.noun}: {entity.name}" + (f".{member.name}" if member is not None else "")
+        if self.mode == "modify":
+            self.member.blockSignals(True)
+            self.member.clear()
+            self.member.addItem("(all members)", None)
+            for f in CT.modifiable_fields(self.db, entity):
+                owner = self.db.parent(f)
+                inherited = f"  ({owner.name})" if owner is not None and owner.id != entity.id else ""
+                self.member.addItem(f"{f.name}{inherited}", f.id)
+            if member is not None:
+                i = self.member.findData(member.id)
+                if i < 0:
+                    self.member.addItem(member.name, member.id)
+                    i = self.member.count() - 1
+                self.member.setCurrentIndex(i)
+            self.member.blockSignals(False)
         self.rebuild()
 
     def rebuild(self):
         if self.entity is None:
+            return
+        if self.mode == "modify":
+            self._rebuild_modify()
             return
         if not self.down.isChecked() and not self.up.isChecked():
             self.info.setText("Tick Descendants, Ancestors or both.")
@@ -377,6 +422,23 @@ class CallTreePanel(QWidget):
         self.info.setText(f"{self.entity.longname}: " + ", ".join(parts) + note + "   ·   " + legend +
                           "   ·   double-click opens code, right-click for more")
 
+    def _rebuild_modify(self):
+        mid = self.member.currentData()
+        member = self.db.entity(mid) if mid is not None else None
+        tree = CT.build_modify_tree(self.db, self.entity, member, self.depth.value(), self.paths.isChecked())
+        self.tree = tree
+        self._layout()
+        what = f"{self.entity.longname}" + (f".{member.name}" if member is not None else "")
+        steps = sum(1 for n in tree.nodes() if n.rel == "write")
+        if not tree.writers:
+            self.info.setText(f"{what}: no writes found. Run Analyze All Files (Ctrl+F5) if the project was "
+                              "analyzed with an older version.")
+            return
+        note = "  ·  node limit reached, reduce the depth" if tree.truncated_nodes else ""
+        self.info.setText(f"{what}: modified by {tree.writers} functions, {steps} write steps{note}   ·   "
+                          "#n = order of the modifications   ↻ recursion   … expanded elsewhere   ▸ depth limit"
+                          "   ·   double-click opens code, right-click for more")
+
     def _layout(self):
         bold = QFont(FONT)
         bold.setBold(True)
@@ -396,22 +458,33 @@ class CallTreePanel(QWidget):
 
     # ---- interaction ------------------------------------------------------------------------------
     def _activate(self, node):
-        if node.entity.file_id:
+        if node.rel == "write" and node.call_file:
+            self.locationActivated.emit(node.call_file, node.call_line)
+        elif node.entity.file_id:
             self.entityActivated.emit(node.entity.id)
 
     def _menu(self, node, pos):
         m = QMenu(self)
         e = node.entity
+        if node.rel == "write":
+            for name, line in node.writes[:12]:
+                m.addAction(f"Go to Write of {name} (line {line})",
+                            lambda line=line: self.locationActivated.emit(node.call_file, line))
+            names = {name for name, _ in node.writes}
+            if len(names) == 1 and self.member.currentData() is None:
+                m.addAction(f"Show Only {e.name}", lambda: self.member.setCurrentIndex(
+                    max(0, self.member.findData(e.id))))
+            m.addSeparator()
         if e.file_id:
             m.addAction("Go to Definition", lambda: self.entityActivated.emit(e.id))
-        if node.call_file and node.call_line and self.mode == "call":
+        if node.call_file and node.call_line and self.mode in ("call", "modify") and node.rel != "write":
             m.addAction(f"Go to Call Site (line {node.call_line})",
                         lambda: self.locationActivated.emit(node.call_file, node.call_line))
         if node.call_file and node.call_line and self.mode == "class":
             what = "Member Declaration" if node.rel == "compose" else "Inheritance Declaration"
             m.addAction(f"Go to {what} (line {node.call_line})",
                         lambda: self.locationActivated.emit(node.call_file, node.call_line))
-        if e.kind in self.kinds and node.depth != 0:
+        if e.kind in self.kinds and node.depth != 0 and self.mode != "modify":
             m.addAction(f"Show {self.noun} of This {'Function' if self.mode == 'call' else 'Class'}",
                         lambda: self.set_function(e))
         m.addSeparator()
@@ -437,7 +510,7 @@ class CallTreePanel(QWidget):
         if self.tree is None:
             return
         name = (self.entity.name if self.entity else "tree").replace(":", "_").replace("~", "")
-        prefix = "calltree" if self.mode == "call" else "classtree"
+        prefix = {"call": "calltree", "class": "classtree", "modify": "modtree"}[self.mode]
         path, _ = QFileDialog.getSaveFileName(self, f"Export {self.noun}", f"{prefix}_{name}.svg",
                                               "SVG image (*.svg);;PNG image (*.png);;Text (*.txt)")
         if not path:

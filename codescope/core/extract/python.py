@@ -7,6 +7,11 @@ import os
 from .. import model as M
 from .base import SKIP, BaseExtractor, Visit, handles
 
+# methods of the built-in containers that modify the object they are called on
+MUTATORS = frozenset({"append", "extend", "insert", "remove", "pop", "clear", "update", "add", "discard",
+                      "setdefault", "sort", "reverse", "popitem", "appendleft", "extendleft", "popleft",
+                      "rotate", "fill", "resize", "put"})
+
 
 def module_name(relpath: str, path: str = "") -> str:
     """Dotted module name. With an absolute *path*, package directories (with __init__.py)
@@ -283,7 +288,30 @@ class PythonExtractor(BaseExtractor):
                         table = self.names.setdefault(cls, {})
                         if name not in table:
                             table[name] = self.add_entity(M.FIELD, name, n, attr, parent=cls)
+                            if attr.start_byte in self.consumed:     # the definition also sets it
+                                self.ref(M.SET, name, attr, self.text(obj))
                 self.set_nodes.add(attr.start_byte)
+                self._mark_modified(obj)
+            elif t == "subscript":
+                self._mark_modified(n.child_by_field_name("value"))
+
+    def _mark_modified(self, n):
+        """``a.b[k].c = x`` also modifies ``a.b`` and ``a``: mark the whole object chain as set."""
+        while n is not None:
+            t = n.type
+            if t == "attribute":
+                attr = n.child_by_field_name("attribute")
+                if attr is not None:
+                    self.set_nodes.add(attr.start_byte)
+                n = n.child_by_field_name("object")
+            elif t == "subscript":
+                n = n.child_by_field_name("value")
+            elif t == "parenthesized_expression":
+                n = n.named_children[0] if n.named_children else None
+            else:
+                if t == "identifier":
+                    self.set_nodes.add(n.start_byte)
+                return
 
     def on_assignment(self, node):
         left = node.child_by_field_name("left")
@@ -300,13 +328,13 @@ class PythonExtractor(BaseExtractor):
             self._bind_targets(left, tname)
 
     def on_augmented_assignment(self, node):
-        left = node.child_by_field_name("left")
-        if left is not None and left.type == "identifier":
-            self.set_nodes.add(left.start_byte)
-        elif left is not None and left.type == "attribute":
-            attr = left.child_by_field_name("attribute")
-            if attr is not None:
-                self.set_nodes.add(attr.start_byte)
+        self._mark_modified(node.child_by_field_name("left"))
+
+    def on_delete_statement(self, node):
+        for c in node.named_children:
+            for t in (c.named_children if c.type == "expression_list" else [c]):
+                if t.type in ("attribute", "subscript"):
+                    self._mark_modified(t)
 
     def on_for_statement(self, node):
         left = node.child_by_field_name("left")
@@ -351,6 +379,8 @@ class PythonExtractor(BaseExtractor):
         elif fn.type == "attribute":
             attr = fn.child_by_field_name("attribute")
             obj = fn.child_by_field_name("object")
+            if self.text(attr) in MUTATORS:      # self.items.append(x) modifies self.items
+                self._mark_modified(obj)
             self.ref(M.CALL, self.text(attr), attr, self.text(obj))
             self.consumed.add(attr.start_byte)
         return None

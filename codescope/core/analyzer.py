@@ -18,6 +18,8 @@ from .metrics import compute_derived
 from .resolver import link
 
 MAX_FILE_SIZE = 8 * 1024 * 1024
+# Bump when the extractors record new information, so existing projects are fully re-parsed.
+EXTRACTOR_VERSION = "2"
 
 
 class Cancelled(Exception):
@@ -167,6 +169,8 @@ class Analyzer:
         t0 = time.time()
         db = self.db
         cfg = db.config()
+        if db.get_meta("extractor") != EXTRACTOR_VERSION and db.files():
+            full = True                     # parsed by an older version: re-parse everything
         self.progress("Scanning", 0, 1, "Scanning source directories")
         sources = scan_sources(cfg)
         known = {f.path: f for f in db.files()}
@@ -249,6 +253,7 @@ class Analyzer:
             self.progress("Metrics", 0, 1, "Computing metrics")
             compute_derived(db)
             db.set_meta("linked", "1")
+        db.set_meta("extractor", EXTRACTOR_VERSION)
         db.set_meta("analyzed_at", time.strftime("%Y-%m-%d %H:%M:%S"))
         db.invalidate()
         self.stats = {"parsed": n, "removed": len(removed), "errors": errors,

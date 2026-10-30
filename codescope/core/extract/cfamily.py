@@ -20,6 +20,14 @@ def strip_templates(s: str) -> str:
 
 
 BUILTIN_TYPES = frozenset({"wchar_t", "char8_t", "char16_t", "char32_t"})
+# member functions of standard containers and smart pointers that modify the object
+MUTATORS = frozenset({
+    "push_back", "push_front", "emplace_back", "emplace_front", "emplace", "emplace_hint", "insert",
+    "insert_or_assign", "try_emplace", "erase", "clear", "pop_back", "pop_front", "resize", "assign",
+    "swap", "reset", "release", "fill", "setZero", "setOnes", "setConstant", "setIdentity", "setRandom",
+    "conservativeResize", "append", "replace", "push", "pop", "merge", "splice", "sort", "unique",
+    "reverse", "remove", "remove_if", "store", "exchange", "fetch_add", "fetch_sub",
+})
 
 DECL_WRAPPERS = frozenset({
     "pointer_declarator", "reference_declarator", "parenthesized_declarator",
@@ -545,6 +553,8 @@ class CExtractor(BaseExtractor):
                 name = self.text(f)
                 if f.type == "template_method":
                     name = self.text(f.child_by_field_name("name"))
+                if name in MUTATORS:            # links.push_back(x) modifies links
+                    self._mark_set(arg)
                 self.ref(M.CALL, name, f, self.compact(arg))
                 self._consume_tree(f)
         elif fn.type == "qualified_identifier":
@@ -592,14 +602,30 @@ class CExtractor(BaseExtractor):
         return SKIP
 
     def _mark_set(self, left):
-        if left is None:
-            return
-        if left.type == "identifier":
-            self.set_nodes.add(left.start_byte)
-        elif left.type == "field_expression":
-            f = left.child_by_field_name("field")
-            if f is not None:
-                self.set_nodes.add(f.start_byte)
+        """Mark the names written by an assignment target.
+
+        In ``a.b[i].c = x`` the object ``a`` and its members ``b`` and ``c`` are all modified;
+        the walk stops at ``->`` because writing through a pointer does not modify the pointer.
+        """
+        while left is not None:
+            t = left.type
+            if t == "identifier":
+                self.set_nodes.add(left.start_byte)
+                return
+            if t == "field_expression":
+                f = left.child_by_field_name("field")
+                if f is not None:
+                    self.set_nodes.add(f.start_byte)
+                op = left.child_by_field_name("operator")
+                if op is not None and self.text(op) == "->":
+                    return
+                left = left.child_by_field_name("argument")
+            elif t == "subscript_expression":
+                left = left.child_by_field_name("argument")
+            elif t == "parenthesized_expression":
+                left = left.named_children[0] if left.named_children else None
+            else:
+                return
 
     def on_assignment_expression(self, node):
         self._mark_set(node.child_by_field_name("left"))

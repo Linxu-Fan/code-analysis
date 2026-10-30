@@ -300,3 +300,88 @@ def test_class_tree_composition(tmp_path):
     layout_call_tree(t)
     assert 'marker-start="url(#dia)"' in to_svg(t, "Model")
     db.close()
+
+
+MODIFY_CPP = """
+#include <vector>
+struct P { double m; };
+struct Body { std::vector<P> parts; double mass; int n; void reset(); };
+void Body::reset() { parts.clear(); mass = 0; n = 0; }
+void grow(Body& b) { b.parts.push_back(P{}); b.n++; }
+void scale(Body* b) { b->mass *= 2; b->parts[0].m = 1; }
+void step(Body& b) { grow(b); scale(&b); b.reset(); }
+int main() { Body b; b.reset(); for (int i = 0; i < 3; ++i) step(b); return 0; }
+"""
+
+MODIFY_PY = """
+class Store:
+    def __init__(self):
+        self.items = []
+        self.meta = {}
+
+    def add(self, x):
+        self.items.append(x)
+        self.meta["n"] = len(self.items)
+
+    def drop(self, k):
+        del self.meta[k]
+
+
+def run():
+    s = Store()
+    s.add(1)
+    s.drop("n")
+"""
+
+
+def test_modification_tree(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_modify_tree, layout_call_tree, to_svg, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "m.cpp").write_text(MODIFY_CPP)
+    (src / "store.py").write_text(MODIFY_PY)
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+
+    def writes_of(name):
+        return {(r.name, db.entity(r.src_id).name) for r in db._refs(
+            "SELECT id, kind, src_id, dst_id, name, qualifier, file_id, line, col FROM refs "
+            "WHERE kind='Set' AND name=?", (name,))}
+    # member chains, subscripts and mutating calls count as writes; '->' stops at the pointer
+    assert ("parts", "grow") in writes_of("parts") and ("parts", "reset") in writes_of("parts")
+    assert ("parts", "scale") in writes_of("parts") and ("m", "scale") in writes_of("m")
+    assert ("b", "grow") in writes_of("b") and ("b", "scale") not in writes_of("b")
+    assert {("items", "__init__"), ("items", "add")} <= writes_of("items")
+    assert {("meta", "add"), ("meta", "drop")} <= writes_of("meta")
+
+    body = one(db, "Body")
+    t = build_modify_tree(db, body)
+    assert t.writers == 3 and [n.entity.name for n in t.down] == ["main"]
+    main = t.down[0]
+    assert [n.entity.name for n in main.children] == ["reset", "step"]
+    order = [(n.step, sorted({w for w, _ in n.writes})) for n in t.nodes() if n.rel == "write"]
+    assert order == [(1, ["mass", "n", "parts"]), (2, ["n", "parts"]), (3, ["mass", "parts"])]
+    step = main.children[1]
+    assert [n.entity.name for n in step.children] == ["grow", "scale", "reset"]
+    assert step.children[2].repeated and step.children[2].via == "repeats #1"   # reset() shown under main
+    text = to_text(t)
+    assert "#3  sets mass, parts" in text and "Modified in" in text
+    mass = next(f for f in db.children(body.id) if f.name == "mass")
+    only = build_modify_tree(db, body, mass)
+    assert [n.step for n in only.nodes() if n.rel == "write"] == [1, 2]
+    assert "Body::mass" in to_text(only)
+    flat = build_modify_tree(db, body, paths=False)
+    assert [n.entity.name for n in flat.down] == ["reset", "grow", "scale"]
+    layout_call_tree(t)
+    assert "#1  sets parts, mass, n" in to_svg(t, "Body")
+
+    store = one(db, "store.Store")
+    ts = build_modify_tree(db, store)
+    assert [n.entity.name for n in ts.down] == ["run"]
+    calls = [n.entity.name for n in ts.down[0].children]
+    assert calls == ["__init__", "add", "drop"]           # Store() reaches the constructor
+    assert [n.step for n in ts.nodes() if n.rel == "write"] == [1, 2, 3]
+    empty = build_modify_tree(db, one(db, "P"), paths=False)
+    assert empty.writers == 1                              # only scale writes P::m
+    db.close()

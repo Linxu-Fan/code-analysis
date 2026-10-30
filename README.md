@@ -23,6 +23,7 @@ click away (moon icon, or **View → Dark Theme**).
 | **Graphs** | Call tree, called-by tree, butterfly, inheritance, UML class diagram, include / included-by, file dependencies, architecture (directory dependencies) and **control flow graphs**. All are interactive: click a node to highlight its connections, double-click to open source, find nodes by name, zoom, and change the depth or folder level. Large dependency graphs show only their strongest edges, drawn thicker by weight. Graphs export to PNG, SVG or Graphviz DOT. |
 | **Call trees** | **Graphs → Call Tree** (Ctrl+Shift+T): pick a function and tick **Descendants** (what it calls), **Ancestors** (what calls it) or both. Every call path becomes its own branch with callees in source order, recursion (↻) and repeated subtrees (…) marked, and a depth limit (▸). A tidy layout puts callers on the left and callees on the right, joined by orthogonal connectors. Double-click to open code, right-click for the call site, re-rooting or collapsing a branch. Exports to SVG, PNG or indented text (`codescope calltree`). |
 | **Class trees** | **Graphs → Class Tree** (Ctrl+Shift+H): pick a class or struct and tick **Descendants** (member types and derived classes), **Ancestors** (base classes and the classes that contain it) or both. Choose **Inheritance**, **Composition** or both: composition follows data members through `std::vector`, smart pointers, `std::optional` and typedefs, labelled `links[] : Link`, `storage_* : Builder`, so a struct without base classes still shows its whole structure. Ancestors go to the left and descendants to the right, with UML triangles (inheritance) and diamonds (composition). Shared parts are shown once and marked (…). **Show members** turns every box into a UML card with fields and methods. Exports to SVG, PNG or text (`codescope classtree`). |
+| **Modification trees** | **Graphs → Modification Tree** (Ctrl+Shift+M): pick a class or struct, and optionally one member, to see where and in which order it is modified. The tree starts at the entry points (e.g. `main`) and follows only the calls that lead to a write. Calls and writes appear in source order, so reading the tree top to bottom gives the order of the modifications, numbered #1, #2, … Writes include assignments, `++`/`+=`, member chains (`a.b[i].c = x`), container and smart-pointer members (`links[i].mass`, `storage_->links`) and mutating calls such as `push_back`, `clear` or `append`. Untick **Show call paths** for a flat list of the modifying functions. Double-click a write to open it. Exports to SVG, PNG or text (`codescope modtree`). |
 | **Metrics** | Lines (code, comment, blank), comment ratio, McCabe cyclomatic complexity, max nesting, statements, parameters, fan-in/fan-out, Halstead volume/difficulty/effort, maintainability index, and for classes WMC, DIT, NOC, CBO and LCOM. Shown in a sortable metrics browser, a treemap, and exported as CSV. |
 | **Dependency analysis** | Dependency structure matrix (DSM) at directory or file level, with dependency cycles highlighted. |
 | **CodeCheck** | 30 configurable rules: complexity and size thresholds, OO design, dead code (uncalled functions, unused globals, parameters and locals), naming conventions, risky constructs (`goto`, empty handlers, bare `except`, assignment in conditions, missing `default`, mutable default arguments, …), style and documentation. |
@@ -36,7 +37,7 @@ click away (moon icon, or **View → Dark Theme**).
 | ![Control flow](docs/screenshots/05_cfg.png) | ![Treemap](docs/screenshots/07_treemap.png) |
 | ![CodeCheck](docs/screenshots/09_codecheck.png) | ![Dependency matrix](docs/screenshots/08_dsm.png) |
 | ![Call tree](docs/screenshots/12_calltree.png) | ![Call tree SVG export](docs/screenshots/12_calltree_svg.png) |
-| ![Class tree with members](docs/screenshots/13_classtree.png) | |
+| ![Class tree with members](docs/screenshots/13_classtree.png) | ![Modification tree](docs/screenshots/14_modtree.png) |
 | ![Start page](docs/screenshots/00_welcome.png) | ![Project overview](docs/screenshots/01_overview.png) |
 
 ## Installing on Windows
@@ -129,6 +130,7 @@ codescope graph   proj.csdb main -t calls|callby|butterfly|inheritance|uml|inclu
 codescope graph   proj.csdb -t architecture -o arch.dot
 codescope classtree proj.csdb geo::Shape --members -o classes.svg     (--up / --down; -r inherit|compose|both)
 codescope calltree proj.csdb geo::Shape::describe --down --up -d 4 -o tree.svg   (or print as text)
+codescope modtree proj.csdb World [-m particles] [--flat] -o world.svg   (or World::particles)
 codescope report  proj.csdb -o report/
 codescope gui     [proj.csdb]
 ```

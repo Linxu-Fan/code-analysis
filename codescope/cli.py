@@ -332,6 +332,33 @@ def cmd_classtree(a):
         print(to_text(tree))
 
 
+def cmd_modtree(a):
+    from .core.calltree import build_modify_tree, modifiable_fields, to_svg, to_text
+    db = _open(a.db)
+    hits = [e for e in _find(db, a.name) if e.kind in M.CLASS_KINDS | {M.FIELD, M.PROPERTY}]
+    if not hits:
+        sys.exit(f"error: '{a.name}' is not a class, struct or member")
+    e, member = hits[0], None
+    if e.kind in (M.FIELD, M.PROPERTY):
+        member, e = e, db.enclosing(e, M.CLASS_KINDS)
+    if a.member:
+        member = next((f for f in modifiable_fields(db, e) if f.name == a.member), None)
+        if member is None:
+            sys.exit(f"error: {e.longname} has no member '{a.member}'")
+    tree = build_modify_tree(db, e, member, depth=a.depth, paths=not a.flat)
+    title = f"Modification tree: {e.longname}" + (f".{member.name}" if member else "")
+    if a.out and a.out.lower().endswith(".svg"):
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_svg(tree, title))
+        print(f"Wrote {a.out} ({tree.writers} modifying functions)")
+    elif a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_text(tree))
+        print(f"Wrote {a.out} ({tree.writers} modifying functions)")
+    else:
+        print(to_text(tree))
+
+
 def cmd_gui(a):
     from .gui.app import main as gui_main
     return gui_main([a.db] if a.db else [])
@@ -455,6 +482,15 @@ def build_parser():
     s.add_argument("--hide-unresolved", action="store_true", help="hide types defined outside the project")
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_classtree)
+
+    s = sub.add_parser("modtree", help="where and in which order a class/struct (or one member) is modified")
+    s.add_argument("db")
+    s.add_argument("name", help="class or struct, or a member such as Body::mass")
+    s.add_argument("-m", "--member", help="only writes of this member")
+    s.add_argument("--flat", action="store_true", help="list the modifying functions without call paths")
+    s.add_argument("-d", "--depth", type=int, default=10)
+    s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
+    s.set_defaults(fn=cmd_modtree)
 
     s = sub.add_parser("gui", help="open the graphical interface")
     s.add_argument("db", nargs="?")

@@ -76,6 +76,11 @@ def test_cli_end_to_end(tmp_path, capsys):
     capsys.readouterr()
     assert main(["classtree", db, "Rect"]) == 0
     assert "\u2190 Shape" in capsys.readouterr().out
+    assert main(["modtree", db, "geo::Rect"]) == 0
+    out = capsys.readouterr().out
+    assert "sets w_, h_" in out and "#1" in out
+    assert main(["modtree", db, "geo::Rect", "-m", "w_", "--flat", "-o", str(tmp_path / "mod.svg")]) == 0
+    capsys.readouterr()
     assert main(["metrics", db, "--project"]) == 0
     assert json.loads(capsys.readouterr().out)["Files"] == 5
     assert main(["report", db, "-o", str(tmp_path / "r"), "-q"]) == 0

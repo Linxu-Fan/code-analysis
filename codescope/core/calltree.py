@@ -30,8 +30,10 @@ class TreeNode:
     repeated: bool = False         # subtree already expanded elsewhere in the tree
     truncated: bool = False        # more levels exist beyond the depth limit
     members: list = field(default_factory=list)   # class trees: UML style member lines
-    rel: str = ""                  # class trees: "inherit" or "compose" (relation to the parent node)
+    rel: str = ""                  # class trees: "inherit"/"compose"; modification trees: "write"
     via: str = ""                  # composition: field name(s) through which the type is held
+    writes: list = field(default_factory=list)    # modification trees: [(field name, line)] of a write step
+    step: int = 0                  # modification trees: order of the write step (1, 2, ...)
     # layout results (centre coordinates)
     x: float = 0.0
     y: float = 0.0
@@ -62,8 +64,9 @@ class CallTree:
     width: float = 0.0
     height: float = 0.0
     truncated_nodes: bool = False
-    kind: str = "call"                           # "call" or "class"
+    kind: str = "call"                           # "call", "class" or "modify"
     relation: str = "both"                       # class trees: "inherit", "compose" or "both"
+    writers: int = 0                             # modification trees: functions that write the target
 
     def nodes(self):
         yield self.root
@@ -201,12 +204,8 @@ def _derived(db, eid):
 
 
 # Wrapper templates are unwrapped to the type they hold; the field is marked with a multiplicity.
-_CONTAINERS = frozenset({"vector", "array", "list", "deque", "forward_list", "set", "multiset", "map",
-                         "multimap", "unordered_map", "unordered_set", "unordered_multimap", "span",
-                         "small_vector", "SmallVector", "QList", "QVector", "Array", "List", "Dict", "Set",
-                         "Sequence", "Iterable", "list_", "dict", "set_", "tuple", "Tuple"})
-_POINTERS = frozenset({"shared_ptr", "unique_ptr", "weak_ptr", "observer_ptr", "QPointer", "QSharedPointer",
-                       "intrusive_ptr", "ref_ptr", "Ref"})
+_CONTAINERS = M.CONTAINER_TYPES
+_POINTERS = M.POINTER_TYPES
 _OTHER_WRAPPERS = frozenset({"optional", "Optional", "variant", "pair", "atomic", "reference_wrapper",
                              "basic_string", "string", "wstring", "string_view", "function"})
 _WRAPPERS = _CONTAINERS | _POINTERS | _OTHER_WRAPPERS
@@ -399,6 +398,196 @@ def build_class_tree(db, entity, descendants=True, ancestors=True, depth=6, hide
     return tree
 
 
+# ---- modification trees ------------------------------------------------------------------------
+
+SCOPE_NODE_KINDS = M.FUNCTION_KINDS | {M.FILE}       # module level code (Python scripts) can call too
+
+
+def modifiable_fields(db, cls):
+    """Fields of *cls*, including inherited ones, in declaration order."""
+    out, seen, stack = [], set(), [cls]
+    while stack:
+        c = stack.pop(0)
+        if c.id in seen:
+            continue
+        seen.add(c.id)
+        out += db.children(c.id, [M.FIELD, M.PROPERTY])
+        stack += [b for b, _, _ in _bases(db, c.id, True)]
+    return out
+
+
+def _is_ctor(f):
+    return f.kind == M.CONSTRUCTOR or (f.kind == M.METHOD and f.name == "__init__")
+
+
+def _callers_of(db, f):
+    """Entities whose code calls *f*; constructors are also reached through their class."""
+    refs = list(db.refs_to(f.id, CALL_KINDS))
+    if _is_ctor(f):
+        cls = db.parent(f)
+        if cls is not None and cls.kind in M.CLASS_KINDS:
+            refs += db.refs_to(cls.id, CALL_KINDS)
+    out = []
+    for r in refs:
+        e = db.entity(r.src_id)
+        if e is not None and e.kind in SCOPE_NODE_KINDS and e.id not in out:
+            out.append(e.id)
+    return out
+
+
+def _line_list(lines):
+    """'line 5' / 'lines 5, 6, 9 +2'."""
+    nums = ", ".join(map(str, lines[:3])) + (f" +{len(lines) - 3}" if len(lines) > 3 else "")
+    return f"line{'s' if len(lines) > 1 else ''} {nums}"
+
+
+def _write_lines(writes, limit=12):
+    """Card lines of a write step: one per member with its line numbers."""
+    by_name = {}
+    for name, line in writes:
+        by_name.setdefault(name, []).append(line)
+    w = max(len(name) for name in by_name)
+    out = [f"{name:<{w}}  {_line_list(lines)}" for name, lines in by_name.items()]
+    if len(out) > limit:
+        out = out[:limit - 1] + [f"\u2026 {len(out) - limit + 1} more members"]
+    return out
+
+
+def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2000):
+    """Where and in which order a class/struct (or one of its members) is modified.
+
+    Every function that writes a field of *entity* (inherited fields included), or only
+    *member* when given, is found.  With *paths* the tree starts at the entry points (functions
+    nobody calls, e.g. ``main``) and follows only the calls that lead to a write.  A function's
+    children are its calls and writes in source order, so a depth-first reading of the tree is
+    the order in which the modifications happen; write steps are numbered #1, #2, ...
+    """
+    root = TreeNode(entity, 0)
+    if member is not None:
+        root.rel, root.via = "member", member.name
+    tree = CallTree(root, kind="modify")
+    fields = [member] if member is not None else modifiable_fields(db, entity)
+    writes = {}                                   # function id -> [(line, col, field, file)]
+    for f in fields:
+        for r in db.refs_to(f.id, [M.SET]):
+            src = db.entity(r.src_id)
+            if src is None or src.kind not in SCOPE_NODE_KINDS:
+                continue
+            lst = writes.setdefault(src.id, [])
+            if not any(w[0] == r.line and w[2].id == f.id for w in lst):
+                lst.append((r.line, r.col, f, r.file_id))
+    tree.writers = len(writes)
+    if not writes:
+        return tree
+    # every function from which a write can be reached
+    reach, stack, callers = set(writes), list(writes), {}
+    while stack:
+        fid = stack.pop()
+        callers[fid] = _callers_of(db, db.entity(fid))
+        for c in callers[fid]:
+            if c not in reach:
+                reach.add(c)
+                stack.append(c)
+    ctors = {}
+
+    def call_targets(r):
+        e = db.entity(r.dst_id)
+        if e is None:
+            return []
+        if e.id in reach:
+            return [e]
+        if e.kind in M.CLASS_KINDS:              # Foo() / new Foo -> its constructors
+            if e.id not in ctors:
+                ctors[e.id] = [c for c in db.children(e.id, sorted(M.FUNCTION_KINDS)) if _is_ctor(c)]
+            return [c for c in ctors[e.id] if c.id in reach]
+        return []
+
+    def steps(fid, with_calls):
+        items = [(line, col, "w", f, file) for line, col, f, file in writes.get(fid, ())]
+        if with_calls:
+            seen = set()
+            for r in db.refs_from(fid, CALL_KINDS):
+                for e in call_targets(r):
+                    if e.id not in seen:
+                        seen.add(e.id)
+                        items.append((r.line, r.col, "c", e, r.file_id))
+        items.sort(key=lambda t: (t[0], t[1]))
+        return items
+
+    budget = [max_nodes]
+
+    def expand(node, path, level, expanded):
+        items = steps(node.entity.id, paths)
+        if level >= depth:
+            node.truncated = bool(items)
+            return
+        group = None
+        for line, _col, what, e, file in items:
+            if what == "w" and group is not None:
+                group.writes.append((e.name, line))
+                continue
+            if budget[0] <= 0:
+                node.truncated = tree.truncated_nodes = True
+                return
+            budget[0] -= 1
+            child = TreeNode(e, level + 1, DOWN, call_line=line, call_file=file)
+            node.children.append(child)
+            if what == "w":
+                child.rel = "write"
+                child.writes.append((e.name, line))
+                group = child
+                continue
+            group = None
+            if e.id in path:
+                child.recursive = True
+                continue
+            if e.id in expanded:
+                child.repeated = True
+                continue
+            expanded.add(e.id)
+            expand(child, path | {e.id}, level + 1, expanded)
+
+    def sort_key(e):
+        f = db.file(e.file_id) if e.file_id else None
+        return (e.name not in ("main", "WinMain", "wmain"), f.relpath if f else "", e.line)
+
+    if paths:
+        starts = sorted((db.entity(i) for i in reach if not callers.get(i)), key=sort_key)
+    else:
+        starts = sorted((db.entity(i) for i in writes), key=sort_key)
+    expanded, pending = set(), sorted((db.entity(i) for i in writes), key=sort_key)
+    while True:
+        for e in starts:
+            if e.id in expanded:
+                continue
+            expanded.add(e.id)
+            node = TreeNode(e, 1, DOWN)
+            tree.down.append(node)
+            expand(node, {e.id}, 1, expanded)
+        # writers only reachable through a call cycle get a root of their own
+        shown = {n.entity.id for c in tree.down for n in c.walk()}
+        starts = [e for e in pending if e.id not in shown][:1]
+        if not starts or budget[0] <= 0:
+            break
+    k = 0
+    for n in tree.nodes():
+        if n.rel == "write":
+            k += 1
+            n.step = k
+            if len({name for name, _ in n.writes}) > 1:
+                n.members = _write_lines(n.writes)
+    # a subtree shown once is referenced by its step numbers where it is called again
+    first = {n.entity.id: n for n in tree.nodes()
+             if n.depth > 0 and n.rel != "write" and not n.repeated and not n.recursive}
+    for n in tree.nodes():
+        if n.repeated and n.entity.id in first:
+            steps = [w.step for w in first[n.entity.id].walk() if w.rel == "write"]
+            if steps:
+                lo, hi = min(steps), max(steps)
+                n.via = f"repeats #{lo}" + (f"\u2013#{hi}" if hi != lo else "")
+    return tree
+
+
 # ---- layout ------------------------------------------------------------------------------------
 
 LINE_H = 15.0
@@ -501,11 +690,21 @@ def layout_call_tree(tree: CallTree, measure=default_measure, level_gap=56.0, si
 
 
 def _display(n: TreeNode):
+    if n.rel == "write":
+        names = list(dict.fromkeys(name for name, _ in n.writes))
+        if len(names) == 1:
+            return f"#{n.step}  sets {names[0]}  ({_line_list([line for _, line in n.writes])})"
+        shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
+        return f"#{n.step}  sets {shown}"
     label = n.label
+    if n.rel == "member":
+        label += ("::" if n.entity.lang in ("c", "cpp") else ".") + n.via
     if n.rel == "compose" and n.via:
         label = f"{n.via} : {label}" if n.side == DOWN else f"{label}.{n.via}"
     if n.recursive:
         label += "  ↻"
+    elif n.repeated and n.via and n.rel != "compose":
+        label += f"  … {n.via}"
     elif n.repeated:
         label += "  …"
     elif n.truncated and not n.children:
@@ -565,6 +764,7 @@ NODE_COLORS = {
     "macro": ("#fde9e4", "#1f2328", "#c0503a"),
     "unresolved": ("#f6f6f6", "#666666", "#9a9a9a"),
     "scope": ("#eef1f4", "#1f2328", "#6b7280"),
+    "write": ("#ffebe9", "#1f2328", "#cf222e"),
 }
 
 
@@ -572,6 +772,8 @@ def node_category(n: TreeNode):
     k = n.entity.kind
     if n.depth == 0:
         return "root"
+    if n.rel == "write":
+        return "write"
     if k in M.UNRESOLVED_KINDS:
         return "unresolved"
     if k in (M.METHOD, M.CONSTRUCTOR):
@@ -603,18 +805,19 @@ def to_svg(tree: CallTree, title=""):
         out.append(f'<text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">{escape(title)}</text>')
     out.append(f'<g transform="translate(0,{oy})">')
     for parent, child, side in edges(tree):
-        dash = ' stroke-dasharray="4,3"' if child.entity.is_unresolved else ""
+        entry = tree.kind == "modify" and parent.depth == 0      # root -> entry point: not a call
+        dash = ' stroke-dasharray="4,3"' if child.entity.is_unresolved or entry else ""
         if tree.kind == "class":
             marker = 'marker-start="url(#dia)"' if child.rel == "compose" else 'marker-start="url(#tri)"'
         else:
-            marker = 'marker-end="url(#ah)"'
+            marker = "" if entry else 'marker-end="url(#ah)"'
         out.append(f'<path d="{path_d(connector(parent, child, side))}" fill="none" stroke="#8b949e" '
                    f'stroke-width="1.3"{dash} {marker}/>')
     for n in tree.nodes():
         fill, fg, border = NODE_COLORS[node_category(n)]
         x, y = n.x - n.width / 2, n.y - n.height / 2
         dash = ' stroke-dasharray="4,3"' if (n.entity.is_unresolved or n.repeated) else ""
-        where = "called" if tree.kind == "call" else "declared"
+        where = "declared" if tree.kind == "class" else "written" if n.rel == "write" else "called"
         tip = escape(n.entity.longname + (f"  ({where} at line {n.call_line})" if n.call_line else ""))
         body = (f'<g><title>{tip}</title><rect x="{x:.1f}" y="{y:.1f}" width="{n.width:.1f}" '
                 f'height="{n.height:.1f}" rx="6" fill="{fill}" stroke="{border}" stroke-width="1.3"{dash}/>')
@@ -644,7 +847,11 @@ def to_text(tree: CallTree):
         for i, n in enumerate(nodes):
             last = i == len(nodes) - 1
             lines.append(f"{prefix}{'└── ' if last else '├── '}{arrow}{_display(n)}"
-                         + (f"   [line {n.call_line}]" if n.call_line and tree.kind == "call" else ""))
+                         + (f"   [line {n.call_line}]" if n.call_line and n.rel != "write"
+                            and tree.kind in ("call", "modify") else ""))
+            if n.rel == "write" and n.members:
+                pad = prefix + ("    " if last else "│   ")
+                lines.extend(f"{pad}    {m}" for m in _write_lines(n.writes, limit=10 ** 6))
             walk(n.children, prefix + ("    " if last else "│   "), arrow)
     if tree.kind == "class":
         up_title, down_title = {
@@ -652,6 +859,8 @@ def to_text(tree: CallTree):
             "compose": ("Contained in (ancestors):", "Member types (descendants):"),
         }.get(tree.relation, ("Base classes and containers (ancestors):",
                               "Member types and derived classes (descendants):"))
+    elif tree.kind == "modify":
+        up_title, down_title = "", "Modified in (call paths, in execution order):"
     else:
         up_title, down_title = ("Callers (ancestors):", "Callees (descendants):")
     if tree.up:
@@ -662,14 +871,17 @@ def to_text(tree: CallTree):
         if tree.up:
             lines.append("")
         lines.append(down_title)
-        lines.append(f"{tree.root.label}")
+        lines.append(_display(tree.root))
         walk(tree.down, "", "")
     if not tree.up and not tree.down:
-        lines.append(f"{tree.root.label}   (no {'related classes' if tree.kind == 'class' else 'calls'} found)")
+        what = {"class": "related classes", "modify": "modifications"}.get(tree.kind, "calls")
+        lines.append(f"{_display(tree.root)}   (no {what} found)")
     lines.append("")
     if tree.kind == "class":
         lines.append("… already shown elsewhere   ↻ cycle   ▸ depth limit   "
                      "name[] container, name* pointer, name? optional member")
+    elif tree.kind == "modify":
+        lines.append("#n order of the modifications   ↻ recursion   … expanded elsewhere   ▸ depth limit reached")
     else:
         lines.append("↻ recursion   … repeated subtree (shown once)   ▸ depth limit reached")
     return "\n".join(lines)

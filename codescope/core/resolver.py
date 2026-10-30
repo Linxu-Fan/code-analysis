@@ -31,6 +31,11 @@ def _param_count(sig: str) -> int:
     return n
 
 
+# members of the smart pointer itself (p.reset()), as opposed to the object it points to (p->x)
+POINTER_OWN_MEMBERS = frozenset({"reset", "get", "release", "swap", "use_count", "lock", "expired",
+                                 "owner_before", "unique", "get_deleter"})
+
+
 class _E:
     __slots__ = ("id", "kind", "name", "longname", "lang", "fam", "file_id", "parent", "owner",
                  "modifiers", "type", "signature", "alias")
@@ -502,10 +507,48 @@ class Linker:
         for p in parts[start:]:
             if cur is None:
                 return None
-            cur = self.member_of(cur, p, depth)
+            cur = self.member_of(cur, p, depth, through=True)
         return cur
 
-    def member_of(self, container, name, depth=0, kinds=None):
+    def held_type(self, eid):
+        """Project class held by a C/C++ container or smart pointer variable (vector<Link> -> Link)."""
+        e = self.E[eid]
+        sig = e.signature or ""
+        m = re.search(r"\b%s\s*<" % re.escape(e.type), sig) if e.type else None
+        if m is None:
+            return None
+        args, depth, cur = [], 1, ""
+        for ch in sig[m.end():]:
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "," and depth == 1:
+                args.append(cur)
+                cur = ""
+                continue
+            cur += ch
+        args.append(cur)
+        arg = args[-1] if "map" in e.type.lower() else args[0]       # map<K, V>: elements are V
+        prev = None
+        while prev != arg:
+            prev, arg = arg, re.sub(r"<[^<>]*>", "", arg)
+        words = [w for w in re.findall(r"[A-Za-z_]\w*", arg.split("::")[-1])
+                 if w not in ("const", "volatile", "typename", "struct", "class")]
+        if not words:
+            return None
+        scope = e.parent if e.parent is not None else eid
+        t = self.lexical(words[-1], scope, M.TYPE_KINDS, e.file_id) or \
+            self.global_lookup(words[-1], M.TYPE_KINDS, eid, e.file_id)
+        if t is not None and self.E[t].kind == M.TYPEDEF:
+            t = self.type_of(t)
+        return t if t is not None and self.E[t].kind in M.CLASS_KINDS else None
+
+    def member_of(self, container, name, depth=0, kinds=None, through=False):
+        """Member *name* of *container*; *through* (inside a qualifier chain) also looks into the
+        objects held by containers and smart pointers."""
         e = self.E[container]
         if kinds is None:
             kinds = frozenset(M.ALL_KINDS)
@@ -521,8 +564,10 @@ class Linker:
         if e.kind in M.CLASS_KINDS:
             return self.member(container, name, kinds)
         t = self.type_of(container, depth + 1)
+        if t is None and through and e.fam == "c" and e.type in M.CONTAINER_TYPES | M.POINTER_TYPES:
+            t = self.held_type(container)       # a.links[i].mass, storage_->links: look through the wrapper
         if t is not None and t != container:
-            return self.member_of(t, name, depth + 1, kinds)
+            return self.member_of(t, name, depth + 1, kinds, through)
         return None
 
     def _resolve(self, r, kinds):
@@ -559,6 +604,14 @@ class Linker:
                 ce = self.E[container]
                 if ce.kind in M.CLASS_KINDS or ce.kind in (M.FILE, M.NAMESPACE):
                     return None
+                if ce.fam == "c" and ce.kind in M.VARIABLE_KINDS and ce.type and ce.type != "auto" \
+                        and self.type_of(container) is None:
+                    # declared with a type from outside the project: v[i].x / p->x reach the held
+                    # type, anything else (v.clear()) is the library type's own member, not a guess
+                    element = qual.rstrip().endswith("]") and ce.type in M.CONTAINER_TYPES
+                    pointee = ce.type in M.POINTER_TYPES and name not in POINTER_OWN_MEMBERS
+                    held = self.held_type(container) if element or pointee else None
+                    return self.member(held, name, kinds) if held is not None else None
             if self.E[src].fam == "c":
                 # namespace qualified names: ns::func
                 full = qual.replace(".", "::") + "::" + name

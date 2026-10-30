@@ -89,6 +89,21 @@ def _draw(name, p, fg, accent):
         _pen(p, accent)
         p.drawLine(QPointF(10, 12), QPointF(15, 5.5))
         p.drawLine(QPointF(10, 12), QPointF(15, 18.5))
+    elif name == "modify":
+        # tree branch ending in a pencil
+        p.drawEllipse(QPointF(5, 6), 2.2, 2.2)
+        p.drawPolyline(QPolygonF([QPointF(7.2, 6), QPointF(10, 6), QPointF(10, 17), QPointF(12, 17)]))
+        p.drawLine(QPointF(10, 6), QPointF(13, 6))
+        p.drawEllipse(QPointF(15.2, 6), 2.2, 2.2)
+        _pen(p, accent, 1.8)
+        pen_path = QPainterPath()
+        pen_path.moveTo(13, 21)
+        pen_path.lineTo(14, 17.5)
+        pen_path.lineTo(20, 11.5)
+        pen_path.lineTo(22, 13.5)
+        pen_path.lineTo(16, 19.5)
+        pen_path.closeSubpath()
+        p.drawPath(pen_path)
     elif name == "metrics":
         _pen(p, fg)
         p.drawLine(QPointF(4, 20), QPointF(20, 20))

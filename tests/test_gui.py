@@ -83,6 +83,16 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     assert cls_panel.mode == "class" and {n.entity.name for n in cls_panel.tree.down} == {"Circle", "Rect"}
     cls_panel.members.setChecked(True)
     assert cls_panel.tree.root.members
+    rect = next(e for e in win.db.entities(name="Rect") if e.kind == "Class")
+    win.open_modify_tree(rect)
+    mod = win.tabs.currentWidget()
+    assert mod.mode == "modify" and mod.tree.writers >= 2
+    assert mod.member.count() > 3                         # all members + w_, h_ and inherited ones
+    mod.paths.setChecked(False)
+    assert "Rect::Rect" in {n.label for n in mod.tree.down}
+    w = next(f for f in win.db.children(rect.id) if f.name == "w_")
+    win.open_modify_tree(w)
+    assert win.tabs.currentWidget().member.currentData() == w.id
     win.open_graph("architecture", None)
     panel = win.tabs.currentWidget()
     some = next(iter(panel.canvas.node_items))

@@ -44,6 +44,14 @@ ALL_KINDS = [FILE, PACKAGE, NAMESPACE, MODULE, CLASS, STRUCT, UNION, INTERFACE, 
              UNRESOLVED_MODULE, UNRESOLVED_INCLUDE]
 
 # ---- reference kinds --------------------------------------------------------
+# Wrapper templates whose instances hold objects of their template argument.
+CONTAINER_TYPES = frozenset({
+    "vector", "array", "list", "deque", "forward_list", "set", "multiset", "map", "multimap", "unordered_map",
+    "unordered_set", "unordered_multimap", "span", "small_vector", "SmallVector", "QList", "QVector", "Array",
+    "List", "Dict", "Set", "Sequence", "Iterable", "list_", "dict", "set_", "tuple", "Tuple"})
+POINTER_TYPES = frozenset({"shared_ptr", "unique_ptr", "weak_ptr", "observer_ptr", "QPointer", "QSharedPointer",
+                           "intrusive_ptr", "ref_ptr", "Ref"})
+
 CALL = "Call"
 USE = "Use"
 SET = "Set"
