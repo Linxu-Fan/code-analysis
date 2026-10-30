@@ -310,6 +310,28 @@ def cmd_calltree(a):
         print(to_text(tree))
 
 
+def cmd_classtree(a):
+    from .core.calltree import build_class_tree, to_svg, to_text
+    db = _open(a.db)
+    classes = [e for e in _find(db, a.name) if e.kind in M.CLASS_KINDS]
+    if not classes:
+        sys.exit(f"error: '{a.name}' is not a class or struct")
+    e = classes[0]
+    both = not a.down and not a.up
+    tree = build_class_tree(db, e, descendants=a.down or both, ancestors=a.up or both, depth=a.depth,
+                            hide_unresolved=a.hide_unresolved, members=a.members)
+    if a.out and a.out.lower().endswith(".svg"):
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_svg(tree, f"Class tree: {e.longname}"))
+        print(f"Wrote {a.out} ({tree.size} classes)")
+    elif a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_text(tree))
+        print(f"Wrote {a.out} ({tree.size} classes)")
+    else:
+        print(to_text(tree))
+
+
 def cmd_gui(a):
     from .gui.app import main as gui_main
     return gui_main([a.db] if a.db else [])
@@ -418,6 +440,17 @@ def build_parser():
     s.add_argument("--repeat", action="store_true", help="expand repeated subtrees every time")
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_calltree)
+
+    s = sub.add_parser("classtree", help="base (--up) and/or derived (--down) classes of a class as a tree")
+    s.add_argument("db")
+    s.add_argument("name", help="class or struct name or qualified name")
+    s.add_argument("--down", action="store_true", help="descendants: derived classes")
+    s.add_argument("--up", action="store_true", help="ancestors: base classes (default: both directions)")
+    s.add_argument("-d", "--depth", type=int, default=6)
+    s.add_argument("--members", action="store_true", help="list fields and methods (UML style, SVG output)")
+    s.add_argument("--hide-unresolved", action="store_true", help="hide base classes outside the project")
+    s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
+    s.set_defaults(fn=cmd_classtree)
 
     s = sub.add_parser("gui", help="open the graphical interface")
     s.add_argument("db", nargs="?")

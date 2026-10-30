@@ -77,6 +77,12 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     ct._picked(classify.longname)
     assert ct.entity.id == classify.id and [n.entity.name for n in ct.tree.up] == ["main"]
     ct._collapse(ct.tree.up[0], True)
+    shape = next(e for e in win.db.entities(name="Shape") if e.kind == "Class")
+    win.open_class_tree(shape)
+    cls_panel = win.tabs.currentWidget()
+    assert cls_panel.mode == "class" and {n.entity.name for n in cls_panel.tree.down} == {"Circle", "Rect"}
+    cls_panel.members.setChecked(True)
+    assert cls_panel.tree.root.members
     win.open_graph("architecture", None)
     panel = win.tabs.currentWidget()
     some = next(iter(panel.canvas.node_items))

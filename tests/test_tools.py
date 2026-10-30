@@ -72,6 +72,10 @@ def test_cli_end_to_end(tmp_path, capsys):
     capsys.readouterr()
     assert main(["calltree", db, "classify", "--up"]) == 0
     assert "\u2190 main" in capsys.readouterr().out
+    assert main(["classtree", db, "geo::Shape", "--members", "-o", str(tmp_path / "cls.svg")]) == 0
+    capsys.readouterr()
+    assert main(["classtree", db, "Rect"]) == 0
+    assert "\u2190 Shape" in capsys.readouterr().out
     assert main(["metrics", db, "--project"]) == 0
     assert json.loads(capsys.readouterr().out)["Files"] == 5
     assert main(["report", db, "-o", str(tmp_path / "r"), "-q"]) == 0

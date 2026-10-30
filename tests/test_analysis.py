@@ -225,3 +225,41 @@ def test_call_tree(tmp_path):
     txt = to_text(t)
     assert "mid  ↻" in txt and "← main" in txt
     db.close()
+
+
+def test_class_tree(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_class_tree, layout_call_tree, to_svg, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "h.hpp").write_text(
+        "struct Base { virtual ~Base(); int id; virtual void run(); };\n"
+        "struct Left : Base { void run() override; };\n"
+        "struct Right : Base { int extra; };\n"
+        "struct Diamond : Left, Right { };\n"
+        "struct Leaf : Diamond { };\n"
+        "class Lone { };\n")
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+    base = one(db, "Base")
+    t = build_class_tree(db, base, descendants=True, ancestors=True)
+    assert [c.entity.name for c in t.down] == ["Left", "Right"]
+    left, right = t.down
+    assert [c.entity.name for c in left.children] == ["Diamond"]
+    assert left.children[0].children[0].entity.name == "Leaf"
+    # the diamond is expanded once and marked where it appears again
+    assert right.children[0].entity.name == "Diamond" and right.children[0].repeated
+    assert t.up == []
+    up = build_class_tree(db, one(db, "Leaf"), descendants=False, ancestors=True)
+    assert [c.entity.name for c in up.up] == ["Diamond"]
+    assert [c.entity.name for c in up.up[0].children] == ["Left", "Right"]
+    m = build_class_tree(db, base, members=True)
+    assert "+ run() {virtual}" in m.root.members and any(l.startswith("+ id") for l in m.root.members)
+    layout_call_tree(m)
+    assert m.root.height > 40                       # member card is taller than a plain box
+    svg = to_svg(m, "classes")
+    assert 'marker-start="url(#tri)"' in svg and "+ run() {virtual}" in svg
+    assert "Derived classes (descendants):" in to_text(t)
+    lone = build_class_tree(db, one(db, "Lone"))
+    assert "no base or derived classes found" in to_text(lone)
+    db.close()

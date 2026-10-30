@@ -28,6 +28,7 @@ class TreeNode:
     recursive: bool = False        # calls something already on its own path
     repeated: bool = False         # subtree already expanded elsewhere in the tree
     truncated: bool = False        # more levels exist beyond the depth limit
+    members: list = field(default_factory=list)   # class trees: UML style member lines
     # layout results (centre coordinates)
     x: float = 0.0
     y: float = 0.0
@@ -58,6 +59,7 @@ class CallTree:
     width: float = 0.0
     height: float = 0.0
     truncated_nodes: bool = False
+    kind: str = "call"                           # "call" or "class"
 
     def nodes(self):
         yield self.root
@@ -149,10 +151,109 @@ def build_call_tree(db, entity, descendants=True, ancestors=False, depth=5, hide
     return tree
 
 
+# ---- class (inheritance) trees -------------------------------------------------------------------
+
+INHERIT_KINDS = (M.INHERIT, M.IMPLEMENT)
+_VIS = {"public": "+", "private": "-", "protected": "#"}
+
+
+def _member_lines(db, cls, limit=8):
+    fields, methods = [], []
+    for m in db.children(cls.id):
+        mods = m.modifiers.split()
+        mark = next((_VIS[x] for x in mods if x in _VIS), "-" if m.name.startswith("_") else "+")
+        if m.kind in (M.FIELD, M.PROPERTY, M.ENUMERATOR):
+            fields.append(f"{mark} {m.name}" + (f" : {m.type}" if m.type else ""))
+        elif m.kind in M.FUNCTION_KINDS:
+            ret = f" : {m.type}" if m.type and m.type != "void" and m.kind != M.CONSTRUCTOR else ""
+            virt = " {virtual}" if {"virtual", "pure"} & set(mods) else ""
+            methods.append(f"{mark} {m.name}(){ret}{virt}")
+    out = fields[:limit] + ([f"  \u2026 {len(fields) - limit} more fields"] if len(fields) > limit else [])
+    out += methods[:limit] + ([f"  \u2026 {len(methods) - limit} more methods"] if len(methods) > limit else [])
+    return out or ["(no members)"]
+
+
+def _bases(db, eid, hide_unresolved):
+    out, seen = [], set()
+    for r in db.refs_from(eid, INHERIT_KINDS):
+        e = db.entity(r.dst_id)
+        if e is None or e.id in seen or (hide_unresolved and e.is_unresolved):
+            continue
+        seen.add(e.id)
+        out.append((e, r.line, r.file_id))
+    return out
+
+
+def _derived(db, eid):
+    out, seen = [], set()
+    for r in db.refs_to(eid, INHERIT_KINDS):
+        e = db.entity(r.src_id)
+        if e is None or e.id in seen or e.kind not in M.CLASS_KINDS:
+            continue
+        seen.add(e.id)
+        out.append((e, r.line, r.file_id))
+    out.sort(key=lambda t: t[0].name.lower())
+    return out
+
+
+def build_class_tree(db, entity, descendants=True, ancestors=True, depth=6, hide_unresolved=False,
+                     members=False, max_nodes=1500):
+    """Inheritance tree of a class/struct: base classes (ancestors) and derived classes (descendants)."""
+    root = TreeNode(entity, 0)
+    tree = CallTree(root, kind="class")
+    budget = [max_nodes]
+
+    def expand(node, path, side, level, expanded):
+        items = _derived(db, node.entity.id) if side == DOWN else _bases(db, node.entity.id, hide_unresolved)
+        if level >= depth:
+            node.truncated = bool(items)
+            return
+        for e, line, fid in items:
+            if budget[0] <= 0:
+                node.truncated = tree.truncated_nodes = True
+                return
+            budget[0] -= 1
+            child = TreeNode(e, level + 1 if side == DOWN else -(level + 1), side, call_line=line, call_file=fid)
+            node.children.append(child)
+            if e.id in path:
+                child.recursive = True
+                continue
+            if e.is_unresolved:
+                continue
+            if e.id in expanded:            # diamond inheritance: shown once
+                child.repeated = bool(_derived(db, e.id) if side == DOWN else _bases(db, e.id, hide_unresolved))
+                continue
+            expanded.add(e.id)
+            expand(child, path | {e.id}, side, level + 1, expanded)
+
+    if descendants:
+        expand(root, {entity.id}, DOWN, 0, {entity.id})
+        tree.down, root.children = root.children, []
+    if ancestors:
+        expand(root, {entity.id}, UP, 0, {entity.id})
+        tree.up, root.children = root.children, []
+    if members:
+        for n in tree.nodes():
+            if not n.entity.is_unresolved:
+                n.members = _member_lines(db, n.entity)
+    return tree
+
+
 # ---- layout ------------------------------------------------------------------------------------
 
+LINE_H = 15.0
+
+
+def node_text(n: TreeNode) -> str:
+    """Label plus member lines (one per line)."""
+    return "\n".join([_display(n)] + list(n.members))
+
+
 def default_measure(label, char_w=7.0, pad_x=14.0, height=26.0):
-    return max(len(label) * char_w + 2 * pad_x, 46.0), height
+    lines = label.split("\n")
+    w = max(len(l) for l in lines) * char_w + 2 * pad_x
+    h = height + (len(lines) - 1) * LINE_H + (8 if len(lines) > 1 else 0)
+    return max(w, 46.0), h
 
 
 def layout_call_tree(tree: CallTree, measure=default_measure, level_gap=56.0, sibling_gap=8.0, margin=24.0):
@@ -162,7 +263,7 @@ def layout_call_tree(tree: CallTree, measure=default_measure, level_gap=56.0, si
     children, giving a balanced, evenly distributed tree.
     """
     for n in tree.nodes():
-        n.width, n.height = measure(_display(n))
+        n.width, n.height = measure(node_text(n))
 
     def stack(nodes, start_y):
         """Assign y to a list of sibling subtrees starting at *start_y*; returns end y."""
@@ -330,24 +431,40 @@ def to_svg(tree: CallTree, title=""):
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h:.0f}" viewBox="0 0 {w:.0f} {h:.0f}" '
            f'font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="12">',
            '<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
-           'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker></defs>',
+           'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>'
+           '<marker id="tri" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" '
+           'orient="auto-start-reverse"><path d="M0,0 L12,6 L0,12 z" fill="#ffffff" stroke="#8b949e"/></marker></defs>',
            '<rect width="100%" height="100%" fill="#ffffff"/>']
     if title:
         out.append(f'<text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">{escape(title)}</text>')
     out.append(f'<g transform="translate(0,{oy})">')
     for parent, child, side in edges(tree):
         dash = ' stroke-dasharray="4,3"' if child.entity.is_unresolved else ""
+        marker = 'marker-start="url(#tri)"' if tree.kind == "class" else 'marker-end="url(#ah)"'
         out.append(f'<path d="{path_d(connector(parent, child, side))}" fill="none" stroke="#8b949e" '
-                   f'stroke-width="1.3"{dash} marker-end="url(#ah)"/>')
+                   f'stroke-width="1.3"{dash} {marker}/>')
     for n in tree.nodes():
         fill, fg, border = NODE_COLORS[node_category(n)]
         x, y = n.x - n.width / 2, n.y - n.height / 2
         dash = ' stroke-dasharray="4,3"' if (n.entity.is_unresolved or n.repeated) else ""
-        tip = escape(n.entity.longname + (f"  (called at line {n.call_line})" if n.call_line else ""))
-        out.append(f'<g><title>{tip}</title><rect x="{x:.1f}" y="{y:.1f}" width="{n.width:.1f}" '
-                   f'height="{n.height:.1f}" rx="6" fill="{fill}" stroke="{border}" stroke-width="1.3"{dash}/>'
-                   f'<text x="{n.x:.1f}" y="{n.y + 4:.1f}" text-anchor="middle" fill="{fg}"'
-                   f'{" font-weight=\"600\"" if n.depth == 0 else ""}>{escape(_display(n))}</text></g>')
+        where = "called" if tree.kind == "call" else "declared"
+        tip = escape(n.entity.longname + (f"  ({where} at line {n.call_line})" if n.call_line else ""))
+        body = (f'<g><title>{tip}</title><rect x="{x:.1f}" y="{y:.1f}" width="{n.width:.1f}" '
+                f'height="{n.height:.1f}" rx="6" fill="{fill}" stroke="{border}" stroke-width="1.3"{dash}/>')
+        bold = ' font-weight="600"' if n.depth == 0 or n.members else ""
+        if n.members:
+            ty = y + 17
+            body += (f'<text x="{n.x:.1f}" y="{ty:.1f}" text-anchor="middle" fill="{fg}"{bold}>'
+                     f'{escape(_display(n))}</text>')
+            sep = y + 25
+            body += f'<line x1="{x:.1f}" y1="{sep:.1f}" x2="{x + n.width:.1f}" y2="{sep:.1f}" stroke="{border}"/>'
+            for i, line in enumerate(n.members):
+                body += (f'<text x="{x + 8:.1f}" y="{sep + 13 + i * LINE_H:.1f}" fill="{fg}" font-size="11" '
+                         f'font-family="Consolas, Menlo, monospace">{escape(line)}</text>')
+        else:
+            body += (f'<text x="{n.x:.1f}" y="{n.y + 4:.1f}" text-anchor="middle" fill="{fg}"{bold}>'
+                     f'{escape(_display(n))}</text>')
+        out.append(body + "</g>")
     out.append("</g></svg>")
     return "\n".join(out)
 
@@ -360,20 +477,25 @@ def to_text(tree: CallTree):
         for i, n in enumerate(nodes):
             last = i == len(nodes) - 1
             lines.append(f"{prefix}{'└── ' if last else '├── '}{arrow}{_display(n)}"
-                         + (f"   [line {n.call_line}]" if n.call_line else ""))
+                         + (f"   [line {n.call_line}]" if n.call_line and tree.kind == "call" else ""))
             walk(n.children, prefix + ("    " if last else "│   "), arrow)
+    up_title, down_title = (("Base classes (ancestors):", "Derived classes (descendants):") if tree.kind == "class"
+                            else ("Callers (ancestors):", "Callees (descendants):"))
     if tree.up:
-        lines.append("Callers (ancestors):")
+        lines.append(up_title)
         lines.append(f"{tree.root.label}")
         walk(tree.up, "", "← ")
     if tree.down:
         if tree.up:
             lines.append("")
-        lines.append("Callees (descendants):")
+        lines.append(down_title)
         lines.append(f"{tree.root.label}")
         walk(tree.down, "", "")
     if not tree.up and not tree.down:
-        lines.append(f"{tree.root.label}   (no calls found)")
+        lines.append(f"{tree.root.label}   (no {'base or derived classes' if tree.kind == 'class' else 'calls'} found)")
     lines.append("")
-    lines.append("↻ recursion   … repeated subtree (shown once)   ▸ depth limit reached")
+    if tree.kind == "class":
+        lines.append("… already shown (diamond inheritance)   ▸ depth limit reached")
+    else:
+        lines.append("↻ recursion   … repeated subtree (shown once)   ▸ depth limit reached")
     return "\n".join(lines)
