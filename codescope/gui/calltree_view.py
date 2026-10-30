@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import (QCheckBox, QCompleter, QFileDialog, QGraphicsItem, QGraphicsPathItem,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QCompleter, QFileDialog, QGraphicsItem, QGraphicsPathItem,
                                QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QMenu,
                                QMessageBox, QPushButton, QSpinBox, QToolButton, QVBoxLayout, QWidget)
 
@@ -36,6 +36,8 @@ class TreeNodeItem(QGraphicsItem):
         self.setFlags(QGraphicsItem.ItemIsSelectable)
         e = node.entity
         tip = f"{e.kind}: {e.longname}"
+        if node.rel == "compose" and node.via:
+            tip += f"\nmember: {node.via}"
         if node.call_line:
             tip += f"\n{'declared' if view.tree is not None and view.tree.kind == 'class' else 'called'} at line {node.call_line}"
         if node.recursive:
@@ -147,7 +149,15 @@ class TreeCanvas(QGraphicsView):
             item.setZValue(1)
             sc.addItem(item)
             ah = QPainterPath()
-            if tree.kind == "class":
+            if tree.kind == "class" and child.rel == "compose":
+                # UML composition: filled diamond at the containing class (path start)
+                tip = path.pointAtPercent(0.0)
+                ah.addPolygon(QPolygonF([tip, QPointF(tip.x() + 7, tip.y() - 4.5), QPointF(tip.x() + 14, tip.y()),
+                                         QPointF(tip.x() + 7, tip.y() + 4.5), tip]))
+                head = QGraphicsPathItem(ah)
+                head.setBrush(edge_color)
+                head.setPen(QPen(edge_color, 1.0))
+            elif tree.kind == "class":
                 # UML generalisation: hollow triangle pointing at the base class (path start)
                 tip = path.pointAtPercent(0.0)
                 ah.addPolygon(QPolygonF([tip, QPointF(tip.x() + 11, tip.y() - 6), QPointF(tip.x() + 11, tip.y() + 6),
@@ -163,7 +173,7 @@ class TreeCanvas(QGraphicsView):
                 head.setBrush(edge_color)
                 head.setPen(Qt.NoPen)
             head.setZValue(1.5)
-            key = (round(ah.boundingRect().x()), round(ah.boundingRect().y()))
+            key = (round(ah.boundingRect().x()), round(ah.boundingRect().y()), child.rel)
             if key not in seen_heads:          # siblings share one triangle at the trunk
                 seen_heads.add(key)
                 sc.addItem(head)
@@ -239,9 +249,9 @@ class CallTreePanel(QWidget):
         comp.activated.connect(self._picked)
         self.picker.returnPressed.connect(lambda: self._picked(self.picker.text()))
         call = mode == "call"
-        self.down = QCheckBox("Descendants (callees)" if call else "Descendants (derived classes)")
+        self.down = QCheckBox("Descendants (callees)" if call else "Descendants (members && derived)")
         self.down.setChecked(True)
-        self.up = QCheckBox("Ancestors (callers)" if call else "Ancestors (base classes)")
+        self.up = QCheckBox("Ancestors (callers)" if call else "Ancestors (bases && containers)")
         self.up.setChecked(not call)
         self.depth = QSpinBox(minimum=1, maximum=20, value=4 if call else 6)
         self.depth.setFixedWidth(64)
@@ -252,15 +262,24 @@ class CallTreePanel(QWidget):
         self.expand.setToolTip("Expand a function every time it appears instead of once")
         self.members = QCheckBox("Show members")
         self.members.setToolTip("List fields and methods inside each class, UML style")
+        self.relation = QComboBox()
+        for text, key in (("Inheritance + Composition", "both"), ("Inheritance", "inherit"),
+                          ("Composition", "compose")):
+            self.relation.addItem(text, key)
+        self.relation.setToolTip("Inheritance: base and derived classes.\n"
+                                 "Composition: the types of the data members, and the classes that "
+                                 "hold this one as a member.")
         if call:
             self.members.hide()
+            self.relation.hide()
         else:
             self.expand.hide()
-            self.hide_unres.setChecked(False)
-            self.hide_unres.setText("Hide external bases")
-            self.hide_unres.setToolTip("Hide base classes defined outside the project (e.g. std::exception)")
+            self.hide_unres.setText("Hide external types")
+            self.hide_unres.setToolTip("Hide types defined outside the project (e.g. std::exception, int, "
+                                       "Eigen::VectorXd)")
         bar.addWidget(QLabel("Function:" if call else "Class:"))
         bar.addWidget(self.picker, 1)
+        bar.addWidget(self.relation)
         bar.addWidget(self.down)
         bar.addWidget(self.up)
         bar.addWidget(QLabel("Depth:"))
@@ -291,6 +310,7 @@ class CallTreePanel(QWidget):
         for w in (self.down, self.up, self.hide_unres, self.expand, self.members):
             w.toggled.connect(self.rebuild)
         self.depth.valueChanged.connect(self.rebuild)
+        self.relation.currentIndexChanged.connect(self.rebuild)
         self.canvas.nodeClicked.connect(lambda n: self.entitySelected.emit(n.entity.id))
         self.canvas.nodeActivated.connect(self._activate)
         self.canvas.nodeMenu.connect(self._menu)
@@ -330,12 +350,21 @@ class CallTreePanel(QWidget):
                                       self.depth.value(), self.hide_unres.isChecked(), self.expand.isChecked())
         else:
             tree = CT.build_class_tree(self.db, self.entity, self.down.isChecked(), self.up.isChecked(),
-                                       self.depth.value(), self.hide_unres.isChecked(), self.members.isChecked())
+                                       self.depth.value(), self.hide_unres.isChecked(), self.members.isChecked(),
+                                       relation=self.relation.currentData())
         self.tree = tree
         self._layout()
         n_up = sum(1 for c in tree.up for _ in c.walk())
         n_down = sum(1 for c in tree.down for _ in c.walk())
-        up_n, down_n = ("caller", "callee") if self.mode == "call" else ("base class", "derived class")
+        rel = self.relation.currentData()
+        if self.mode == "call":
+            up_n, down_n = "caller", "callee"
+        elif rel == "inherit":
+            up_n, down_n = "base class", "derived class"
+        elif rel == "compose":
+            up_n, down_n = "container", "member type"
+        else:
+            up_n, down_n = "base/container", "member/derived"
         parts = []
         if self.up.isChecked():
             parts.append(f"{n_up} {up_n} nodes")
@@ -343,7 +372,8 @@ class CallTreePanel(QWidget):
             parts.append(f"{n_down} {down_n} nodes")
         note = "  ·  node limit reached, reduce the depth" if tree.truncated_nodes else ""
         legend = ("↻ recursion   … shown elsewhere   ▸ depth limit" if self.mode == "call"
-                  else "… shown elsewhere (diamond)   ▸ depth limit   △ points to the base class")
+                  else "… shown elsewhere   ▸ depth limit   △ base class   ◆ owner of a member   "
+                       "name[] container  name* pointer  name? optional")
         self.info.setText(f"{self.entity.longname}: " + ", ".join(parts) + note + "   ·   " + legend +
                           "   ·   double-click opens code, right-click for more")
 
@@ -378,7 +408,8 @@ class CallTreePanel(QWidget):
             m.addAction(f"Go to Call Site (line {node.call_line})",
                         lambda: self.locationActivated.emit(node.call_file, node.call_line))
         if node.call_file and node.call_line and self.mode == "class":
-            m.addAction(f"Go to Inheritance Declaration (line {node.call_line})",
+            what = "Member Declaration" if node.rel == "compose" else "Inheritance Declaration"
+            m.addAction(f"Go to {what} (line {node.call_line})",
                         lambda: self.locationActivated.emit(node.call_file, node.call_line))
         if e.kind in self.kinds and node.depth != 0:
             m.addAction(f"Show {self.noun} of This {'Function' if self.mode == 'call' else 'Class'}",

@@ -259,7 +259,44 @@ def test_class_tree(tmp_path):
     assert m.root.height > 40                       # member card is taller than a plain box
     svg = to_svg(m, "classes")
     assert 'marker-start="url(#tri)"' in svg and "+ run() {virtual}" in svg
-    assert "Derived classes (descendants):" in to_text(t)
+    assert "Member types and derived classes (descendants):" in to_text(t)
+    inh = build_class_tree(db, base, relation="inherit")
+    assert "Derived classes (descendants):" in to_text(inh)
     lone = build_class_tree(db, one(db, "Lone"))
-    assert "no base or derived classes found" in to_text(lone)
+    assert "no related classes found" in to_text(lone)
+    db.close()
+
+
+def test_class_tree_composition(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_class_tree, layout_call_tree, to_svg, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "m.hpp").write_text(
+        "#include <vector>\n#include <memory>\n"
+        "namespace eng {\n"
+        "struct Link { double mass; };\n"
+        "struct Joint { int type; };\n"
+        "using Real = double;\n"
+        "struct Builder { std::vector<Link> links; std::vector<Joint> joints; Real dt; };\n"
+        "class Model { std::shared_ptr<const Builder> storage_; static int count; };\n"
+        "class World { Model model_; };\n"
+        "}\n")
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+    model = one(db, "eng::Model")
+    t = build_class_tree(db, model, hide_unresolved=True)
+    assert [(c.entity.name, c.via, c.rel) for c in t.down] == [("Builder", "storage_*", "compose")]
+    parts = {c.entity.name: c.via for c in t.down[0].children}
+    assert parts == {"Link": "links[]", "Joint": "joints[]"}
+    assert [(c.entity.name, c.via) for c in t.up] == [("World", "model_")]
+    text = to_text(t)
+    assert "storage_* : Builder" in text and "World.model_" in text
+    # external types (double behind the Real alias) are listed unless hidden
+    full = build_class_tree(db, one(db, "eng::Builder"), ancestors=False)
+    assert any(c.via == "dt" for c in full.down)
+    # inheritance only: a class without bases has nothing to show
+    assert build_class_tree(db, model, relation="inherit").down == []
+    layout_call_tree(t)
+    assert 'marker-start="url(#dia)"' in to_svg(t, "Model")
     db.close()

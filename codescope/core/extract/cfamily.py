@@ -484,8 +484,10 @@ class CExtractor(BaseExtractor):
         if typ is not None and typ.type in ("struct_specifier", "class_specifier", "union_specifier",
                                             "enum_specifier") and typ.child_by_field_name("body") is not None:
             visit.append(typ)
+            plain_type = None
         else:
-            self.type_ref(typ)
+            plain_type = typ          # referenced below by each field (or by the class for methods)
+        typed_by_field = False
         dv = node.child_by_field_name("default_value")
         for d in node.children_by_field_name("declarator"):
             inner = self.unwrap(d)
@@ -506,8 +508,15 @@ class CExtractor(BaseExtractor):
                     for p in params.named_children:
                         self.type_ref(p.child_by_field_name("type"))
             elif inner.type in ("field_identifier", "identifier"):
-                self.add_entity(M.FIELD, self.text(inner), d, inner, type=tname, modifiers=" ".join(mods),
-                                signature=(self.compact(typ) + " " + self.compact(d))[:200] if typ is not None else "")
+                lid = self.add_entity(M.FIELD, self.text(inner), d, inner, type=tname, modifiers=" ".join(mods),
+                                      signature=(self.compact(typ) + " " + self.compact(d))[:200]
+                                      if typ is not None else "")
+                if plain_type is not None:
+                    # the field itself references its type: enables composition (has-a) analysis
+                    self.type_ref(plain_type, src=lid)
+                    typed_by_field = True
+        if plain_type is not None and not typed_by_field:
+            self.type_ref(plain_type)
         if dv is not None and not any(self.unwrap(d) is not None and self.unwrap(d).type == "function_declarator"
                                       for d in node.children_by_field_name("declarator")):
             visit.append(dv)

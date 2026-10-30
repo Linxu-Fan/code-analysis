@@ -319,7 +319,7 @@ def cmd_classtree(a):
     e = classes[0]
     both = not a.down and not a.up
     tree = build_class_tree(db, e, descendants=a.down or both, ancestors=a.up or both, depth=a.depth,
-                            hide_unresolved=a.hide_unresolved, members=a.members)
+                            hide_unresolved=a.hide_unresolved, members=a.members, relation=a.relation)
     if a.out and a.out.lower().endswith(".svg"):
         with open(a.out, "w", encoding="utf-8") as fh:
             fh.write(to_svg(tree, f"Class tree: {e.longname}"))
@@ -441,14 +441,18 @@ def build_parser():
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_calltree)
 
-    s = sub.add_parser("classtree", help="base (--up) and/or derived (--down) classes of a class as a tree")
+    s = sub.add_parser("classtree", help="related classes of a class as a tree: bases/containers (--up), "
+                       "members/derived classes (--down)")
     s.add_argument("db")
     s.add_argument("name", help="class or struct name or qualified name")
-    s.add_argument("--down", action="store_true", help="descendants: derived classes")
-    s.add_argument("--up", action="store_true", help="ancestors: base classes (default: both directions)")
+    s.add_argument("--down", action="store_true", help="descendants: member types and derived classes")
+    s.add_argument("--up", action="store_true", help="ancestors: base classes and containing classes "
+                   "(default: both directions)")
+    s.add_argument("-r", "--relation", choices=("both", "inherit", "compose"), default="both",
+                   help="inheritance, composition (data members) or both (default)")
     s.add_argument("-d", "--depth", type=int, default=6)
     s.add_argument("--members", action="store_true", help="list fields and methods (UML style, SVG output)")
-    s.add_argument("--hide-unresolved", action="store_true", help="hide base classes outside the project")
+    s.add_argument("--hide-unresolved", action="store_true", help="hide types defined outside the project")
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_classtree)
 

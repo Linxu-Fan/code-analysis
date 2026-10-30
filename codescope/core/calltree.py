@@ -8,6 +8,7 @@ trees of real code finite and readable.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from xml.sax.saxutils import escape
 
@@ -29,6 +30,8 @@ class TreeNode:
     repeated: bool = False         # subtree already expanded elsewhere in the tree
     truncated: bool = False        # more levels exist beyond the depth limit
     members: list = field(default_factory=list)   # class trees: UML style member lines
+    rel: str = ""                  # class trees: "inherit" or "compose" (relation to the parent node)
+    via: str = ""                  # composition: field name(s) through which the type is held
     # layout results (centre coordinates)
     x: float = 0.0
     y: float = 0.0
@@ -60,6 +63,7 @@ class CallTree:
     height: float = 0.0
     truncated_nodes: bool = False
     kind: str = "call"                           # "call" or "class"
+    relation: str = "both"                       # class trees: "inherit", "compose" or "both"
 
     def nodes(self):
         yield self.root
@@ -196,32 +200,188 @@ def _derived(db, eid):
     return out
 
 
+# Wrapper templates are unwrapped to the type they hold; the field is marked with a multiplicity.
+_CONTAINERS = frozenset({"vector", "array", "list", "deque", "forward_list", "set", "multiset", "map",
+                         "multimap", "unordered_map", "unordered_set", "unordered_multimap", "span",
+                         "small_vector", "SmallVector", "QList", "QVector", "Array", "List", "Dict", "Set",
+                         "Sequence", "Iterable", "list_", "dict", "set_", "tuple", "Tuple"})
+_POINTERS = frozenset({"shared_ptr", "unique_ptr", "weak_ptr", "observer_ptr", "QPointer", "QSharedPointer",
+                       "intrusive_ptr", "ref_ptr", "Ref"})
+_OTHER_WRAPPERS = frozenset({"optional", "Optional", "variant", "pair", "atomic", "reference_wrapper",
+                             "basic_string", "string", "wstring", "string_view", "function"})
+_WRAPPERS = _CONTAINERS | _POINTERS | _OTHER_WRAPPERS
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _multiplicity(sig: str) -> str:
+    words = set(_IDENT.findall(sig.split("=")[0]))
+    if words & _CONTAINERS or "[" in sig.split("=")[0]:
+        return "[]"
+    if words & _POINTERS or "*" in sig.split("=")[0]:
+        return "*"
+    if "optional" in words or "Optional" in words:
+        return "?"
+    return ""
+
+
+def _alias_target(alias) -> str:
+    """Name an alias/typedef really refers to: 'using A = typename X<T>::Y' -> 'Y', 'using B = Foo<T>' -> 'Foo'."""
+    sig = alias.signature or ""
+    if "=" in sig:
+        rhs = sig.split("=", 1)[1]
+    else:
+        rhs = sig.replace("typedef", " ", 1).rsplit(alias.name, 1)[0]
+    prev = None
+    while prev != rhs:                      # drop template arguments
+        prev = rhs
+        rhs = re.sub(r"<[^<>]*>", "", rhs)
+    words = [w for w in _IDENT.findall(rhs.split("::")[-1]) if w not in ("typename", "const", "struct", "class")]
+    return words[-1] if words else ""
+
+
+def _class_by_name(db, name, lang_family, cache, _seen=None):
+    """A project class/struct called *name* (aliases followed to what they name), or None."""
+    key = (name, lang_family)
+    if key in cache:
+        return cache[key]
+    from .languages import family
+    seen = (_seen or set()) | {name}
+    hit = None
+    for e in db.entities(name=name, kinds=sorted(M.CLASS_KINDS | {M.TYPEDEF})):
+        if family(e.lang) != lang_family or e.file_id is None:
+            continue
+        if e.kind == M.TYPEDEF:
+            target = _alias_target(e)
+            e = _class_by_name(db, target, lang_family, cache, seen) if target and target not in seen else None
+        if e is not None:
+            hit = e
+            break
+    cache[key] = hit
+    return hit
+
+
+def _parts(db, cls, hide_unresolved, cache):
+    """Types held by the fields of *cls*, in declaration order: [(entity, line, file, via)]."""
+    from .languages import family
+    fam = family(cls.lang)
+    order, info = [], {}
+    for f in db.children(cls.id, [M.FIELD, M.PROPERTY]):
+        if "static" in f.modifiers.split():
+            continue
+        targets = []
+        for r in db.refs_from(f.id, [M.TYPED]):
+            e = db.entity(r.dst_id)
+            if e is None or e.name in _WRAPPERS:
+                continue
+            if e.kind == M.TYPEDEF:
+                e = _class_by_name(db, e.name, fam, cache) or e
+            # aliases of non-project types (e.g. Eigen vectors) count as external types
+            external = e.kind in M.UNRESOLVED_KINDS or e.kind == M.TYPEDEF
+            if e.kind in M.CLASS_KINDS or (external and not hide_unresolved):
+                targets.append(e)
+        if not targets:
+            # older databases or dynamic languages: use the declared type text
+            text = (f.signature or f.type or "")
+            if f.signature and f.name in text:
+                text = text[: text.rfind(f.name)]
+            for word in _IDENT.findall(text):
+                if word in _WRAPPERS or word == f.name:
+                    continue
+                e = _class_by_name(db, word, fam, cache)
+                if e is not None:
+                    targets.append(e)
+        mult = _multiplicity(f.signature or "")
+        for e in targets:
+            if e.id == cls.id and not mult:
+                continue
+            label = f.name + mult
+            if e.id not in info:
+                order.append(e.id)
+                info[e.id] = [e, f.line, f.file_id, [label]]
+            elif label not in info[e.id][3]:
+                info[e.id][3].append(label)
+    return [(info[i][0], info[i][1], info[i][2], ", ".join(info[i][3])) for i in order]
+
+
+def _owners(db, cls):
+    """Classes that hold *cls* in one of their fields: [(owner entity, line, file, via)]."""
+    names = {cls.name}
+    targets = [cls.id]
+    for t in db.entities(kinds=[M.TYPEDEF]):
+        if t.type == cls.name:
+            targets.append(t.id)
+            names.add(t.name)
+    out = {}
+    for tid in targets:
+        for r in db.refs_to(tid, [M.TYPED]):
+            f = db.entity(r.src_id)
+            if f is None or f.kind not in (M.FIELD, M.PROPERTY):
+                continue
+            owner = db.parent(f)
+            if owner is None or owner.kind not in M.CLASS_KINDS or owner.id == cls.id:
+                continue
+            label = f.name + _multiplicity(f.signature or "")
+            entry = out.setdefault(owner.id, [owner, f.line, f.file_id, []])
+            if label not in entry[3]:
+                entry[3].append(label)
+    if not out and cls.lang == "python":
+        for f in db.entities(kinds=[M.FIELD]):
+            if f.type and f.type.split(".")[-1] in names:
+                owner = db.parent(f)
+                if owner is not None and owner.kind in M.CLASS_KINDS and owner.id != cls.id:
+                    out.setdefault(owner.id, [owner, f.line, f.file_id, []])[3].append(f.name)
+    return sorted(((o, l, fi, ", ".join(v)) for o, l, fi, v in out.values()), key=lambda t: t[0].name.lower())
+
+
 def build_class_tree(db, entity, descendants=True, ancestors=True, depth=6, hide_unresolved=False,
-                     members=False, max_nodes=1500):
-    """Inheritance tree of a class/struct: base classes (ancestors) and derived classes (descendants)."""
+                     members=False, max_nodes=1500, relation="both"):
+    """Structure tree of a class/struct.
+
+    *relation* "inherit": base classes (ancestors) and derived classes (descendants).
+    *relation* "compose": classes that contain it as a member (ancestors) and the types of its
+    own fields, recursively (descendants).  "both" combines the two.
+    """
     root = TreeNode(entity, 0)
-    tree = CallTree(root, kind="class")
+    tree = CallTree(root, kind="class", relation=relation)
     budget = [max_nodes]
+    cache = {}
+    inherit = relation in ("inherit", "both")
+    compose = relation in ("compose", "both")
+
+    def related(e, side):
+        out = []
+        if side == DOWN:
+            if compose:
+                out += [(x, l, f, "compose", via) for x, l, f, via in _parts(db, e, hide_unresolved, cache)]
+            if inherit:
+                out += [(x, l, f, "inherit", "") for x, l, f in _derived(db, e.id)]
+        else:
+            if inherit:
+                out += [(x, l, f, "inherit", "") for x, l, f in _bases(db, e.id, hide_unresolved)]
+            if compose:
+                out += [(x, l, f, "compose", via) for x, l, f, via in _owners(db, e)]
+        return out
 
     def expand(node, path, side, level, expanded):
-        items = _derived(db, node.entity.id) if side == DOWN else _bases(db, node.entity.id, hide_unresolved)
+        items = related(node.entity, side)
         if level >= depth:
             node.truncated = bool(items)
             return
-        for e, line, fid in items:
+        for e, line, fid, rel, via in items:
             if budget[0] <= 0:
                 node.truncated = tree.truncated_nodes = True
                 return
             budget[0] -= 1
-            child = TreeNode(e, level + 1 if side == DOWN else -(level + 1), side, call_line=line, call_file=fid)
+            child = TreeNode(e, level + 1 if side == DOWN else -(level + 1), side, call_line=line, call_file=fid,
+                             rel=rel, via=via)
             node.children.append(child)
             if e.id in path:
                 child.recursive = True
                 continue
             if e.is_unresolved:
                 continue
-            if e.id in expanded:            # diamond inheritance: shown once
-                child.repeated = bool(_derived(db, e.id) if side == DOWN else _bases(db, e.id, hide_unresolved))
+            if e.id in expanded:            # shared parts / diamond inheritance: expanded once
+                child.repeated = bool(related(e, side))
                 continue
             expanded.add(e.id)
             expand(child, path | {e.id}, side, level + 1, expanded)
@@ -342,6 +502,8 @@ def layout_call_tree(tree: CallTree, measure=default_measure, level_gap=56.0, si
 
 def _display(n: TreeNode):
     label = n.label
+    if n.rel == "compose" and n.via:
+        label = f"{n.via} : {label}" if n.side == DOWN else f"{label}.{n.via}"
     if n.recursive:
         label += "  ↻"
     elif n.repeated:
@@ -433,14 +595,19 @@ def to_svg(tree: CallTree, title=""):
            '<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
            'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>'
            '<marker id="tri" viewBox="0 0 12 12" refX="11" refY="6" markerWidth="11" markerHeight="11" '
-           'orient="auto-start-reverse"><path d="M0,0 L12,6 L0,12 z" fill="#ffffff" stroke="#8b949e"/></marker></defs>',
+           'orient="auto-start-reverse"><path d="M0,0 L12,6 L0,12 z" fill="#ffffff" stroke="#8b949e"/></marker>'
+           '<marker id="dia" viewBox="0 0 16 10" refX="1" refY="5" markerWidth="14" markerHeight="9" '
+           'orient="auto"><path d="M0,5 L8,0 L16,5 L8,10 z" fill="#8b949e"/></marker></defs>',
            '<rect width="100%" height="100%" fill="#ffffff"/>']
     if title:
         out.append(f'<text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">{escape(title)}</text>')
     out.append(f'<g transform="translate(0,{oy})">')
     for parent, child, side in edges(tree):
         dash = ' stroke-dasharray="4,3"' if child.entity.is_unresolved else ""
-        marker = 'marker-start="url(#tri)"' if tree.kind == "class" else 'marker-end="url(#ah)"'
+        if tree.kind == "class":
+            marker = 'marker-start="url(#dia)"' if child.rel == "compose" else 'marker-start="url(#tri)"'
+        else:
+            marker = 'marker-end="url(#ah)"'
         out.append(f'<path d="{path_d(connector(parent, child, side))}" fill="none" stroke="#8b949e" '
                    f'stroke-width="1.3"{dash} {marker}/>')
     for n in tree.nodes():
@@ -479,8 +646,14 @@ def to_text(tree: CallTree):
             lines.append(f"{prefix}{'└── ' if last else '├── '}{arrow}{_display(n)}"
                          + (f"   [line {n.call_line}]" if n.call_line and tree.kind == "call" else ""))
             walk(n.children, prefix + ("    " if last else "│   "), arrow)
-    up_title, down_title = (("Base classes (ancestors):", "Derived classes (descendants):") if tree.kind == "class"
-                            else ("Callers (ancestors):", "Callees (descendants):"))
+    if tree.kind == "class":
+        up_title, down_title = {
+            "inherit": ("Base classes (ancestors):", "Derived classes (descendants):"),
+            "compose": ("Contained in (ancestors):", "Member types (descendants):"),
+        }.get(tree.relation, ("Base classes and containers (ancestors):",
+                              "Member types and derived classes (descendants):"))
+    else:
+        up_title, down_title = ("Callers (ancestors):", "Callees (descendants):")
     if tree.up:
         lines.append(up_title)
         lines.append(f"{tree.root.label}")
@@ -492,10 +665,11 @@ def to_text(tree: CallTree):
         lines.append(f"{tree.root.label}")
         walk(tree.down, "", "")
     if not tree.up and not tree.down:
-        lines.append(f"{tree.root.label}   (no {'base or derived classes' if tree.kind == 'class' else 'calls'} found)")
+        lines.append(f"{tree.root.label}   (no {'related classes' if tree.kind == 'class' else 'calls'} found)")
     lines.append("")
     if tree.kind == "class":
-        lines.append("… already shown (diamond inheritance)   ▸ depth limit reached")
+        lines.append("… already shown elsewhere   ↻ cycle   ▸ depth limit   "
+                     "name[] container, name* pointer, name? optional member")
     else:
         lines.append("↻ recursion   … repeated subtree (shown once)   ▸ depth limit reached")
     return "\n".join(lines)
