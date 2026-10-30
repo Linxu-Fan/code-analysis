@@ -77,6 +77,13 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     ct._picked(classify.longname)
     assert ct.entity.id == classify.id and [n.entity.name for n in ct.tree.up] == ["main"]
     ct._collapse(ct.tree.up[0], True)
+    ct.up.setChecked(False)
+    ct.down.setChecked(True)
+    ct.set_function(next(e for e in win.db.entities(name="main") if e.kind == "Function" and e.lang == "cpp"))
+    ct.depth.setValue(1)
+    cut = next(n for n in ct.tree.down if n.truncated)
+    ct._grow(cut, 1)
+    assert cut.children and ct.depth.value() == 1 and cut in ct.tree.nodes()
     shape = next(e for e in win.db.entities(name="Shape") if e.kind == "Class")
     win.open_class_tree(shape)
     cls_panel = win.tabs.currentWidget()

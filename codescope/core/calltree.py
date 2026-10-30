@@ -492,6 +492,53 @@ def build_member_tree(db, entity, descendants=True, ancestors=True, depth=3, hid
     return tree
 
 
+# ---- expanding one branch -------------------------------------------------------------------------
+
+def can_grow(tree, node):
+    """True if *node* has more to show: cut off by the depth limit, or expanded elsewhere ('…')."""
+    return (tree.kind in ("call", "class") and node.depth != 0 and not node.children
+            and not node.recursive and (node.truncated or node.repeated) and not node.entity.is_unresolved)
+
+
+def grow(db, tree, node, levels=1, hide_unresolved=False, expand_repeated=False, members=False):
+    """Expand *node* by *levels* more levels, independent of the depth of the rest of the tree.
+
+    The node's subtree is built as if it were the root of its own tree (same options as the
+    whole tree) and grafted in place.  Returns the number of nodes added.
+    """
+    down = node.side != UP
+    if tree.kind == "call":
+        sub = build_call_tree(db, node.entity, down, not down, levels, hide_unresolved, expand_repeated)
+        kids = sub.down if down else sub.up
+    elif tree.relation == "members":
+        kids = []
+        targets = _field_types(db, node.entity, True, {}) if node.entity.kind in (M.FIELD, M.PROPERTY) \
+            else [node.entity]
+        for t in targets:
+            if t.kind in M.CLASS_KINDS:
+                kids += build_member_tree(db, t, True, False, levels, hide_unresolved).down
+    else:
+        sub = build_class_tree(db, node.entity, down, not down, levels, hide_unresolved, members,
+                               relation=tree.relation)
+        kids = sub.down if down else sub.up
+    for k in kids:
+        for n in k.walk():
+            n.depth += node.depth          # both negative on the ancestor side
+    node.children = kids
+    node.truncated = node.repeated = False
+    node.collapsed = None
+    return sum(1 for k in kids for _ in k.walk())
+
+
+def grow_branch(db, tree, node, **opts):
+    """Expand every cut-off end inside the branch of *node* by one level."""
+    added = 0
+    for n in list(node.walk()):
+        if n is not node and n.truncated and not n.children and can_grow(tree, n):
+            added += grow(db, tree, n, 1, **opts)
+    return added
+
+
 # ---- modification trees ------------------------------------------------------------------------
 
 SCOPE_NODE_KINDS = M.FUNCTION_KINDS | {M.FILE}       # module level code (Python scripts) can call too

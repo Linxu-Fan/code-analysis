@@ -462,3 +462,41 @@ def test_member_tree(tmp_path):
     layout_call_tree(t)
     assert "+ parts[] : Part" in to_svg(t, "Machine")
     db.close()
+
+
+def test_grow_single_branch(cpp_db, tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import (build_call_tree, build_member_tree, can_grow, grow, grow_branch,
+                                         to_text)
+    main = one(cpp_db, "main")
+    t = build_call_tree(cpp_db, main, depth=1, hide_unresolved=True)
+    cut = [n for n in t.down if n.truncated]
+    assert cut and all(not n.children for n in t.down)
+    n = cut[0]
+    assert can_grow(t, n)
+    added = grow(cpp_db, t, n, 1, hide_unresolved=True)
+    assert added == len(n.children) > 0 and not n.truncated
+    assert all(c.depth == 2 for c in n.children)              # depths continue from the node
+    assert all(not o.children for o in t.down if o is not n)  # the rest of the tree is unchanged
+    assert "▸" not in to_text(t).split(n.label)[1].split("\n")[0]
+    # ancestors: depths stay negative
+    area = one(cpp_db, "geo::Rect::area")
+    up = build_call_tree(cpp_db, area, descendants=False, ancestors=True, depth=1)
+    u = next((x for x in up.up if can_grow(up, x)), None)
+    if u is not None:
+        grow(cpp_db, up, u, 2)
+        assert all(c.depth <= -2 for c in u.children)
+    # member trees: a cut-off data member grows into the members of its type
+    src = tmp_path / "m"
+    src.mkdir()
+    (src / "m.hpp").write_text(MEMBERS_CPP)
+    db = create_project(str(tmp_path / "m.csdb"), "m", [str(src)])
+    Analyzer(db).analyze()
+    mt = build_member_tree(db, one(db, "Machine"), depth=1)
+    holder = mt.down[0]
+    assert holder.truncated and can_grow(mt, holder)
+    grow(db, mt, holder, 1)
+    assert [c.via for c in holder.children][:2] == ["+ parts[] : Part", "+ main* : Part"]
+    assert all(c.truncated for c in holder.children[:1])
+    assert grow_branch(db, mt, holder) > 0 and holder.children[0].children
+    db.close()

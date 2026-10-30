@@ -434,12 +434,12 @@ class CallTreePanel(QWidget):
             parts.append(f"{n_down} {down_n} nodes")
         note = "  ·  node limit reached, reduce the depth" if tree.truncated_nodes else ""
         if self.mode == "call":
-            legend = "↻ recursion   … shown elsewhere   ▸ depth limit"
+            legend = "↻ recursion   … shown elsewhere   ▸ more levels (right-click to expand)"
         elif rel == "members":
             legend = ("+ public  - private  # protected   name() member function   name[] container  "
                       "name* pointer  name? optional   … type expanded elsewhere   ▸ depth limit")
         else:
-            legend = ("… shown elsewhere   ▸ depth limit   △ base class   ◆ owner of a member   "
+            legend = ("… shown elsewhere   ▸ more (right-click to expand)   △ base class   ◆ owner of a member   "
                       "name[] container  name* pointer  name? optional")
         self.info.setText(f"{self.entity.longname}: " + ", ".join(parts) + note + "   ·   " + legend +
                           "   ·   double-click opens code, right-click for more")
@@ -470,7 +470,8 @@ class CallTreePanel(QWidget):
                           "#n = order of the modifications   = whole object replaced   ↻ recursion   … expanded elsewhere   ▸ depth limit"
                           "   ·   double-click opens code, right-click for more")
 
-    def _layout(self):
+    def _layout(self, anchor=None):
+        """Lay the tree out and show it; with *anchor*, keep that node where it is on screen."""
         bold = QFont(FONT)
         bold.setBold(True)
         fmb = QFontMetricsF(bold)
@@ -484,8 +485,18 @@ class CallTreePanel(QWidget):
                 w = max(w, max(fmm.horizontalAdvance(l) for l in lines[1:]) + 22)
                 return max(w, 48.0), 26.0 + (len(lines) - 1) * CT.LINE_H + 8
             return max(w, 48.0), 26.0
+        view = self.canvas
+        before = view.mapFromScene(QPointF(anchor.x, anchor.y)) if anchor is not None else None
+        transform = view.transform()
         CT.layout_call_tree(self.tree, measure)
-        self.canvas.show_tree(self.tree)
+        view.show_tree(self.tree)
+        if before is not None:
+            view.setTransform(transform)
+            # scroll so the anchor node lands on the same viewport position as before
+            now = view.mapFromScene(QPointF(anchor.x, anchor.y))
+            for bar, delta in ((view.horizontalScrollBar(), now.x() - before.x()),
+                               (view.verticalScrollBar(), now.y() - before.y())):
+                bar.setValue(bar.value() + delta)
 
     # ---- interaction ------------------------------------------------------------------------------
     def _activate(self, node):
@@ -520,10 +531,17 @@ class CallTreePanel(QWidget):
             m.addAction(f"Show {self.noun} of This {'Function' if self.mode == 'call' else 'Class'}",
                         lambda: self.set_function(e))
         m.addSeparator()
+        if CT.can_grow(self.tree, node):
+            m.addAction("Expand One Level", lambda: self._grow(node, 1))
+            m.addAction("Expand 3 Levels", lambda: self._grow(node, 3))
+            m.addAction("Expand All Levels", lambda: self._grow(node, 10))
         if node.children:
+            if any(n.truncated and not n.children for n in node.walk()) and self.mode != "modify":
+                m.addAction("Expand Branch One Level Deeper", lambda: self._grow(node, 0))
             m.addAction("Collapse Branch", lambda: self._collapse(node, True))
         if getattr(node, "collapsed", None):
             m.addAction("Expand Branch", lambda: self._collapse(node, False))
+        m.addSeparator()
         m.addAction("View Information", lambda: self.entitySelected.emit(e.id))
         m.exec(pos)
 
@@ -536,7 +554,21 @@ class CallTreePanel(QWidget):
             node.collapsed = None
         if node.depth == 0:
             return
-        self._layout()
+        self._layout(anchor=node)
+
+    def _grow(self, node, levels):
+        """Expand one node (*levels* > 0) or every cut-off end of its branch by one level (0),
+        leaving the depth of the rest of the tree alone."""
+        opts = {"hide_unresolved": self.hide_unres.isChecked()}
+        if self.mode == "call":
+            opts["expand_repeated"] = self.expand.isChecked()
+        elif self.relation.currentData() != "members":
+            opts["members"] = self.members.isChecked()
+        added = CT.grow_branch(self.db, self.tree, node, **opts) if levels == 0 else \
+            CT.grow(self.db, self.tree, node, levels, **opts)
+        self._layout(anchor=node)
+        if not added:
+            self.info.setText(f"{node.entity.longname}: nothing more to show.")
 
     def export(self):
         if self.tree is None:
