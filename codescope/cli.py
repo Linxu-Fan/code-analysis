@@ -345,7 +345,7 @@ def cmd_modtree(a):
         member = next((f for f in modifiable_fields(db, e) if f.name == a.member), None)
         if member is None:
             sys.exit(f"error: {e.longname} has no member '{a.member}'")
-    tree = build_modify_tree(db, e, member, depth=a.depth, paths=not a.flat)
+    tree = build_modify_tree(db, e, member, depth=a.depth, paths=not a.flat, whole=not a.no_whole)
     title = f"Modification tree: {e.longname}" + (f".{member.name}" if member else "")
     if a.out and a.out.lower().endswith(".svg"):
         with open(a.out, "w", encoding="utf-8") as fh:
@@ -488,6 +488,8 @@ def build_parser():
     s.add_argument("name", help="class or struct, or a member such as Body::mass")
     s.add_argument("-m", "--member", help="only writes of this member")
     s.add_argument("--flat", action="store_true", help="list the modifying functions without call paths")
+    s.add_argument("--no-whole", action="store_true",
+                   help="ignore assignments that replace the whole object (obj.settings = other)")
     s.add_argument("-d", "--depth", type=int, default=10)
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_modtree)

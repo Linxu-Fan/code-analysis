@@ -360,7 +360,7 @@ def test_modification_tree(tmp_path):
     assert t.writers == 3 and [n.entity.name for n in t.down] == ["main"]
     main = t.down[0]
     assert [n.entity.name for n in main.children] == ["reset", "step"]
-    order = [(n.step, sorted({w for w, _ in n.writes})) for n in t.nodes() if n.rel == "write"]
+    order = [(n.step, sorted({w for w, _, _ in n.writes})) for n in t.nodes() if n.rel == "write"]
     assert order == [(1, ["mass", "n", "parts"]), (2, ["n", "parts"]), (3, ["mass", "parts"])]
     step = main.children[1]
     assert [n.entity.name for n in step.children] == ["grow", "scale", "reset"]
@@ -384,4 +384,42 @@ def test_modification_tree(tmp_path):
     assert [n.step for n in ts.nodes() if n.rel == "write"] == [1, 2, 3]
     empty = build_modify_tree(db, one(db, "P"), paths=False)
     assert empty.writers == 1                              # only scale writes P::m
+    db.close()
+
+
+WHOLE_CPP = """
+#include <vector>
+struct Settings { double damping; };
+struct Options { Settings settings; double dt; };
+struct Sim { Options options; std::vector<Settings> history; Settings* current; };
+void configure(Sim& s, const Options& o) { s.options = o; }
+void tweak(Sim& s) { s.options.dt = 0.1; }
+void tune(Sim& s) { s.options.settings.damping = 2; }
+void record(Sim& s) { s.history.push_back(Settings{}); s.current = nullptr; }
+int main() { Sim s; Options o; configure(s, o); tweak(s); tune(s); record(s); return 0; }
+"""
+
+
+def test_modification_tree_whole_object(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_modify_tree, holder_paths, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "w.cpp").write_text(WHOLE_CPP)
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+    settings = one(db, "Settings")
+    # held by value directly and through Options; the vector and the pointer do not count
+    assert sorted(p for _, p in holder_paths(db, settings)) == ["options.settings", "settings"]
+    t = build_modify_tree(db, settings)
+    main = t.down[0]
+    assert [c.entity.name for c in main.children] == ["configure", "tune"]   # not tweak, not record
+    steps = [(n.step, n.writes) for n in t.nodes() if n.rel == "write"]
+    assert steps == [(1, [("options.settings", 6, True)]), (2, [("damping", 8, False)])]
+    text = to_text(t)
+    assert "#1  replaces options.settings  (line 6)" in text and "#2  sets damping" in text
+    damping = next(f for f in db.children(settings.id) if f.name == "damping")
+    assert [n.step for n in build_modify_tree(db, settings, damping).nodes() if n.rel == "write"] == [1, 2]
+    direct = build_modify_tree(db, settings, whole=False)
+    assert [c.entity.name for c in direct.down[0].children] == ["tune"]
     db.close()

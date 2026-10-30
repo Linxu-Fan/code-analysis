@@ -302,33 +302,42 @@ def _parts(db, cls, hide_unresolved, cache):
     return [(info[i][0], info[i][1], info[i][2], ", ".join(info[i][3])) for i in order]
 
 
-def _owners(db, cls):
-    """Classes that hold *cls* in one of their fields: [(owner entity, line, file, via)]."""
+def _holding_fields(db, cls):
+    """Fields of other classes whose declared type involves *cls*: [(field, owner class)]."""
     names = {cls.name}
     targets = [cls.id]
     for t in db.entities(kinds=[M.TYPEDEF]):
         if t.type == cls.name:
             targets.append(t.id)
             names.add(t.name)
-    out = {}
+    out, seen = [], set()
     for tid in targets:
         for r in db.refs_to(tid, [M.TYPED]):
             f = db.entity(r.src_id)
-            if f is None or f.kind not in (M.FIELD, M.PROPERTY):
+            if f is None or f.kind not in (M.FIELD, M.PROPERTY) or f.id in seen:
                 continue
             owner = db.parent(f)
             if owner is None or owner.kind not in M.CLASS_KINDS or owner.id == cls.id:
                 continue
-            label = f.name + _multiplicity(f.signature or "")
-            entry = out.setdefault(owner.id, [owner, f.line, f.file_id, []])
-            if label not in entry[3]:
-                entry[3].append(label)
+            seen.add(f.id)
+            out.append((f, owner))
     if not out and cls.lang == "python":
         for f in db.entities(kinds=[M.FIELD]):
             if f.type and f.type.split(".")[-1] in names:
                 owner = db.parent(f)
                 if owner is not None and owner.kind in M.CLASS_KINDS and owner.id != cls.id:
-                    out.setdefault(owner.id, [owner, f.line, f.file_id, []])[3].append(f.name)
+                    out.append((f, owner))
+    return out
+
+
+def _owners(db, cls):
+    """Classes that hold *cls* in one of their fields: [(owner entity, line, file, via)]."""
+    out = {}
+    for f, owner in _holding_fields(db, cls):
+        label = f.name + (_multiplicity(f.signature or "") if f.lang != "python" else "")
+        entry = out.setdefault(owner.id, [owner, f.line, f.file_id, []])
+        if label not in entry[3]:
+            entry[3].append(label)
     return sorted(((o, l, fi, ", ".join(v)) for o, l, fi, v in out.values()), key=lambda t: t[0].name.lower())
 
 
@@ -444,8 +453,8 @@ def _line_list(lines):
 def _write_lines(writes, limit=12):
     """Card lines of a write step: one per member with its line numbers."""
     by_name = {}
-    for name, line in writes:
-        by_name.setdefault(name, []).append(line)
+    for name, line, whole in writes:
+        by_name.setdefault(f"= {name}" if whole else name, []).append(line)
     w = max(len(name) for name in by_name)
     out = [f"{name:<{w}}  {_line_list(lines)}" for name, lines in by_name.items()]
     if len(out) > limit:
@@ -453,7 +462,36 @@ def _write_lines(writes, limit=12):
     return out
 
 
-def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2000):
+def holder_paths(db, cls, max_depth=4):
+    """Fields that hold *cls* by value, directly or nested: [(field, path)].
+
+    For ``struct World { Options options; }; struct Options { Settings settings; };`` and
+    *cls* = Settings this gives (Options::settings, "settings") and
+    (World::options, "options.settings").  Containers and pointers are left out: adding to a
+    vector or re-pointing a pointer does not change an existing object.
+    """
+    out, frontier, seen = [], [(cls, "")], {cls.id}
+    for _ in range(max_depth):
+        nxt = []
+        for c, path in frontier:
+            for f, owner in _holding_fields(db, c):
+                if "static" in f.modifiers.split() or _multiplicity(f.signature or "") not in ("", "?"):
+                    continue
+                p = f.name + ("." + path if path else "")
+                out.append((f, p))
+                if owner.id not in seen:
+                    seen.add(owner.id)
+                    nxt.append((owner, p))
+        frontier = nxt
+    return out
+
+
+def _last_part(qualifier):
+    q = re.sub(r"\[[^\]]*\]|\(\)", "", qualifier or "").replace("->", ".").replace("::", ".")
+    return q.rstrip(".").rsplit(".", 1)[-1]
+
+
+def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2000, whole=True):
     """Where and in which order a class/struct (or one of its members) is modified.
 
     Every function that writes a field of *entity* (inherited fields included), or only
@@ -461,21 +499,41 @@ def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2
     nobody calls, e.g. ``main``) and follows only the calls that lead to a write.  A function's
     children are its calls and writes in source order, so a depth-first reading of the tree is
     the order in which the modifications happen; write steps are numbered #1, #2, ...
+
+    With *whole*, assigning a field that holds the class by value (``world.options = other``,
+    nested holders included) also counts: it replaces every member at once.  A write to a
+    sub-member of such a field (``world.options.time_step = x``) does not.
     """
     root = TreeNode(entity, 0)
     if member is not None:
         root.rel, root.via = "member", member.name
     tree = CallTree(root, kind="modify")
     fields = [member] if member is not None else modifiable_fields(db, entity)
-    writes = {}                                   # function id -> [(line, col, field, file)]
+    writes = {}                     # function id -> [(line, col, field, file, label, whole)]
+
+    def add(r, f, label, is_whole):
+        src = db.entity(r.src_id)
+        if src is None or src.kind not in SCOPE_NODE_KINDS:
+            return
+        lst = writes.setdefault(src.id, [])
+        if not any(w[0] == r.line and w[2].id == f.id for w in lst):
+            lst.append((r.line, r.col, f, r.file_id, label, is_whole))
+
     for f in fields:
         for r in db.refs_to(f.id, [M.SET]):
-            src = db.entity(r.src_id)
-            if src is None or src.kind not in SCOPE_NODE_KINDS:
-                continue
-            lst = writes.setdefault(src.id, [])
-            if not any(w[0] == r.line and w[2].id == f.id for w in lst):
-                lst.append((r.line, r.col, f, r.file_id))
+            add(r, f, f.name, False)
+    if whole:
+        line_refs = {}
+        for f, path in holder_paths(db, entity):
+            for r in db.refs_to(f.id, [M.SET]):
+                key = (r.src_id, r.line)
+                if key not in line_refs:
+                    line_refs[key] = [x for x in db.refs_from(r.src_id, [M.SET, M.CALL, M.USE], resolved=False)
+                                      if x.line == r.line]
+                # x.f.y = v / x.f.g() only touch part of f: not a whole replacement
+                if any(x.col > r.col and _last_part(x.qualifier) == f.name for x in line_refs[key]):
+                    continue
+                add(r, f, path, True)
     tree.writers = len(writes)
     if not writes:
         return tree
@@ -503,7 +561,8 @@ def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2
         return []
 
     def steps(fid, with_calls):
-        items = [(line, col, "w", f, file) for line, col, f, file in writes.get(fid, ())]
+        items = [(line, col, "w", (f, label, is_whole), file)
+                 for line, col, f, file, label, is_whole in writes.get(fid, ())]
         if with_calls:
             seen = set()
             for r in db.refs_from(fid, CALL_KINDS):
@@ -523,9 +582,11 @@ def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2
             return
         group = None
         for line, _col, what, e, file in items:
-            if what == "w" and group is not None:
-                group.writes.append((e.name, line))
-                continue
+            if what == "w":
+                e, label, is_whole = e
+                if group is not None:
+                    group.writes.append((label, line, is_whole))
+                    continue
             if budget[0] <= 0:
                 node.truncated = tree.truncated_nodes = True
                 return
@@ -534,7 +595,7 @@ def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2
             node.children.append(child)
             if what == "w":
                 child.rel = "write"
-                child.writes.append((e.name, line))
+                child.writes.append((label, line, is_whole))
                 group = child
                 continue
             group = None
@@ -574,7 +635,7 @@ def build_modify_tree(db, entity, member=None, depth=10, paths=True, max_nodes=2
         if n.rel == "write":
             k += 1
             n.step = k
-            if len({name for name, _ in n.writes}) > 1:
+            if len({(name, w) for name, _, w in n.writes}) > 1:
                 n.members = _write_lines(n.writes)
     # a subtree shown once is referenced by its step numbers where it is called again
     first = {n.entity.id: n for n in tree.nodes()
@@ -691,11 +752,15 @@ def layout_call_tree(tree: CallTree, measure=default_measure, level_gap=56.0, si
 
 def _display(n: TreeNode):
     if n.rel == "write":
-        names = list(dict.fromkeys(name for name, _ in n.writes))
-        if len(names) == 1:
-            return f"#{n.step}  sets {names[0]}  ({_line_list([line for _, line in n.writes])})"
-        shown = ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "")
-        return f"#{n.step}  sets {shown}"
+        parts = []
+        for verb, is_whole in (("sets", False), ("replaces", True)):
+            names = list(dict.fromkeys(name for name, _, w in n.writes if w == is_whole))
+            if names:
+                parts.append(f"{verb} " + ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else ""))
+        text = f"#{n.step}  " + "; ".join(parts)
+        if not n.members:
+            text += f"  ({_line_list([line for _, line, _ in n.writes])})"
+        return text
     label = n.label
     if n.rel == "member":
         label += ("::" if n.entity.lang in ("c", "cpp") else ".") + n.via
@@ -881,7 +946,7 @@ def to_text(tree: CallTree):
         lines.append("… already shown elsewhere   ↻ cycle   ▸ depth limit   "
                      "name[] container, name* pointer, name? optional member")
     elif tree.kind == "modify":
-        lines.append("#n order of the modifications   ↻ recursion   … expanded elsewhere   ▸ depth limit reached")
+        lines.append("#n order of the modifications   = / replaces: whole object assigned   ↻ recursion   … expanded elsewhere   ▸ depth limit reached")
     else:
         lines.append("↻ recursion   … repeated subtree (shown once)   ▸ depth limit reached")
     return "\n".join(lines)

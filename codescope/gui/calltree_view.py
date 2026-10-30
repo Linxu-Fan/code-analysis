@@ -40,8 +40,9 @@ class TreeNodeItem(QGraphicsItem):
         if node.rel == "compose" and node.via:
             tip += f"\nmember: {node.via}"
         if node.rel == "write":
-            tip = f"Step #{node.step}: {e.kind.lower()} written\n" + "\n".join(
-                f"  {name}  (line {line})" for name, line in node.writes) + "\nDouble-click opens the write"
+            tip = f"Step #{node.step}\n" + "\n".join(
+                f"  {'replaces ' + name + ' (the whole object)' if whole else 'sets ' + name}  (line {line})"
+                for name, line, whole in node.writes) + "\nDouble-click opens the write"
         elif node.call_line:
             tip += f"\n{'declared' if view.tree is not None and view.tree.kind == 'class' else 'called'} at line {node.call_line}"
         if node.recursive:
@@ -284,12 +285,17 @@ class CallTreePanel(QWidget):
         self.paths.setChecked(True)
         self.paths.setToolTip("Start at the entry points (e.g. main) and follow the calls that lead to a "
                               "modification.\nUntick to list only the functions that write the members.")
+        self.whole = QCheckBox("Whole-object writes")
+        self.whole.setChecked(True)
+        self.whole.setToolTip("Also count assignments that replace the whole object, e.g. world.options = other "
+                              "when\nthe class is held by value in a field (nested holders included)")
         if mode == "modify":
             for w in (self.down, self.up, self.hide_unres, self.expand, self.members, self.relation):
                 w.hide()
         else:
             self.member.hide()
             self.paths.hide()
+            self.whole.hide()
         if call:
             self.members.hide()
             self.relation.hide()
@@ -305,6 +311,7 @@ class CallTreePanel(QWidget):
             bar.addWidget(QLabel("Member:"))
         bar.addWidget(self.member)
         bar.addWidget(self.paths)
+        bar.addWidget(self.whole)
         bar.addWidget(self.down)
         bar.addWidget(self.up)
         bar.addWidget(QLabel("Depth:"))
@@ -332,7 +339,7 @@ class CallTreePanel(QWidget):
         v.addWidget(bar_w)
         v.addWidget(self.canvas, 1)
         v.addWidget(self.info)
-        for w in (self.down, self.up, self.hide_unres, self.expand, self.members, self.paths):
+        for w in (self.down, self.up, self.hide_unres, self.expand, self.members, self.paths, self.whole):
             w.toggled.connect(self.rebuild)
         self.member.currentIndexChanged.connect(self.rebuild)
         self.depth.valueChanged.connect(self.rebuild)
@@ -426,7 +433,8 @@ class CallTreePanel(QWidget):
     def _rebuild_modify(self):
         mid = self.member.currentData()
         member = self.db.entity(mid) if mid is not None else None
-        tree = CT.build_modify_tree(self.db, self.entity, member, self.depth.value(), self.paths.isChecked())
+        tree = CT.build_modify_tree(self.db, self.entity, member, self.depth.value(), self.paths.isChecked(),
+                                    whole=self.whole.isChecked())
         self.tree = tree
         self._layout()
         what = f"{self.entity.longname}" + (f".{member.name}" if member is not None else "")
@@ -437,7 +445,7 @@ class CallTreePanel(QWidget):
             return
         note = "  ·  node limit reached, reduce the depth" if tree.truncated_nodes else ""
         self.info.setText(f"{what}: modified by {tree.writers} functions, {steps} write steps{note}   ·   "
-                          "#n = order of the modifications   ↻ recursion   … expanded elsewhere   ▸ depth limit"
+                          "#n = order of the modifications   = whole object replaced   ↻ recursion   … expanded elsewhere   ▸ depth limit"
                           "   ·   double-click opens code, right-click for more")
 
     def _layout(self):
@@ -468,11 +476,12 @@ class CallTreePanel(QWidget):
         m = QMenu(self)
         e = node.entity
         if node.rel == "write":
-            for name, line in node.writes[:12]:
+            for name, line, _whole in node.writes[:12]:
                 m.addAction(f"Go to Write of {name} (line {line})",
                             lambda line=line: self.locationActivated.emit(node.call_file, line))
-            names = {name for name, _ in node.writes}
-            if len(names) == 1 and self.member.currentData() is None:
+            names = {name for name, _, whole in node.writes if not whole}
+            if len(names) == 1 and len(node.writes) == len([w for w in node.writes if not w[2]]) \
+                    and self.member.currentData() is None:
                 m.addAction(f"Show Only {e.name}", lambda: self.member.setCurrentIndex(
                     max(0, self.member.findData(e.id))))
             m.addSeparator()
