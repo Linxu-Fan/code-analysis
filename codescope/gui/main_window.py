@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 
 from PySide6.QtCore import QFileSystemWatcher, QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
@@ -198,8 +199,10 @@ class MainWindow(QMainWindow):
         self._disk_timer = QTimer(self, singleShot=True, interval=300, timeout=self.check_external_changes)
         self._reanalyze_timer = QTimer(self, singleShot=True, interval=1000, timeout=self._reanalyze_changed)
         self._checking_disk = False
-        QApplication.instance().applicationStateChanged.connect(
-            lambda state: state == Qt.ApplicationActive and self._disk_timer.start())
+        # project files that are not open: compared with the analysis every few seconds
+        self._scan_timer = QTimer(self, interval=4000, timeout=self.scan_project_changes)
+        self._scanner = None
+        QApplication.instance().applicationStateChanged.connect(self._app_state_changed)
         self.setCentralWidget(self.tabs)
         self.welcome = WelcomePage(self)
         self.tabs.addTab(self.welcome, app_icon(), "Start Page")
@@ -277,6 +280,10 @@ class MainWindow(QMainWindow):
         self.a_analyze = self._act("&Analyze Changed Files", lambda: self.analyze(False), "F5", icon="analyze")
         self.a_full = self._act("Analyze &All Files", lambda: self.analyze(True), "Ctrl+F5")
         self.a_overview = self._act("Project &Overview", self.show_overview, icon="info")
+        self.a_watch = self._act("&Watch Files for Changes", self._toggle_watch,
+                                 tip="Re-analyze automatically when project files change on disk")
+        self.a_watch.setCheckable(True)
+        self.a_watch.setChecked(self.settings.value("watchFiles", True) not in (False, "false", "0"))
         self.a_find = self._act("&Find in Files\u2026", self.find_in_files, "Ctrl+Shift+F", icon="find_files")
         self.a_find_entity = self._act("Find &Entity\u2026", lambda: (self.quick.setFocus(), self.quick.selectAll()),
                                        "Ctrl+E", icon="search")
@@ -320,7 +327,7 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(self.a_exit)
         m = mb.addMenu("&Project")
-        for a in (self.a_config, None, self.a_analyze, self.a_full, None, self.a_overview):
+        for a in (self.a_config, None, self.a_analyze, self.a_full, self.a_watch, None, self.a_overview):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu("&Search")
         for a in (self.a_find, self.a_find_entity, None, self.a_back, self.a_fwd):
@@ -501,6 +508,7 @@ class MainWindow(QMainWindow):
         else:
             self.reload_views()
             self.show_overview()
+        self._scan_timer.start()
 
     def close_project(self):
         if self.worker is not None:
@@ -512,6 +520,7 @@ class MainWindow(QMainWindow):
             self.tabs.removeTab(0)
             if w is not self.welcome:
                 w.deleteLater()
+        self._scan_timer.stop()
         if self.watcher.files():
             self.watcher.removePaths(self.watcher.files())
         if self.db is not None:
@@ -756,6 +765,47 @@ class MainWindow(QMainWindow):
         if reloaded:
             self.status_label.setText("Reloaded " + ", ".join(reloaded) + " (changed on disk); re-analyzing …")
             self._reanalyze_timer.start()
+
+    def _app_state_changed(self, state):
+        if state == Qt.ApplicationActive:          # back from another program: look for its changes
+            self._disk_timer.start()
+            QTimer.singleShot(0, self.scan_project_changes)
+
+    def _toggle_watch(self, on):
+        self.settings.setValue("watchFiles", bool(on))
+        if on:
+            self.scan_project_changes()
+
+    def scan_project_changes(self):
+        """Look for project files (open or not) that were added, changed or deleted on disk."""
+        if self.db is None or not self.a_watch.isChecked() or self.worker is not None:
+            return
+        if self._scanner is not None and self._scanner.isRunning():
+            return
+        from ..core.analyzer import pending_changes
+        known = {f.path: (f.lang, f.size, f.mtime) for f in self.db.files()}
+        cfg = self.db.config()
+        def scan(progress, cancelled):
+            t0 = time.monotonic()
+            return pending_changes(cfg, known), time.monotonic() - t0
+        self._scanner = Worker(scan, self)
+        self._scanner.done.connect(self._scanned)
+        self._scanner.failed.connect(lambda _msg: None)   # e.g. a root folder that is gone: try later
+        self._scanner.start()
+
+    def _scanned(self, result):
+        (changed, added, removed), seconds = result
+        # big trees: scan less often, so scanning takes at most about 5 % of the time
+        self._scan_timer.setInterval(int(max(4000, seconds * 20000)))
+        if self.db is None or not (changed or added or removed):
+            return
+        parts = [f"{len(x)} {what}" for x, what in ((changed, "changed"), (added, "new"), (removed, "deleted")) if x]
+        names = [os.path.basename(p) for p in (changed + added + removed)[:3]]
+        more = " …" if len(changed) + len(added) + len(removed) > 3 else ""
+        self.status_label.setText(f"Files changed on disk ({', '.join(parts)}: {', '.join(names)}{more}); "
+                                  "re-analyzing …")
+        self.check_external_changes()              # open editors first
+        self._reanalyze_timer.start(500)
 
     def _reanalyze_changed(self):
         """Bring the analysis up to date after external changes, without disturbing the work in progress."""

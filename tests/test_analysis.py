@@ -504,3 +504,35 @@ def test_grow_single_branch(cpp_db, tmp_path):
     assert all(c.truncated for c in holder.children[:1])
     assert grow_branch(db, mt, holder) > 0 and holder.children[0].children
     db.close()
+
+
+def test_pending_changes(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from codescope.core import analyzer as AN
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "a.cpp").write_text("int a() { return 1; }\n")
+    (src / "b.cpp").write_text("int b() { return 2; }\n")
+    db = AN.create_project(str(tmp_path / "p.csdb"), "p", [str(src)])
+    Analyzer(db).analyze()
+
+    def pending():
+        return AN.pending_changes(db.config(), {f.path: (f.lang, f.size, f.mtime) for f in db.files()})
+    assert pending() == ([], [], [])
+    time.sleep(0.02)
+    (src / "a.cpp").write_text("int a() { return 10; }\n")
+    (src / "c.cpp").write_text("int c() { return 3; }\n")
+    os.remove(src / "b.cpp")
+    changed, added, removed = pending()
+    assert [os.path.basename(p) for p in changed + added + removed] == ["a.cpp", "c.cpp", "b.cpp"]
+    Analyzer(db).analyze()
+    assert pending() == ([], [], [])                  # the analysis clears what was reported
+    os.utime(src / "c.cpp", None)                     # touched, same content: reported once, then stable
+    assert pending()[0]
+    Analyzer(db).analyze()
+    assert pending() == ([], [], [])
+    monkeypatch.setattr(AN, "MAX_FILE_SIZE", 10)      # files the analyzer skips are never reported
+    assert pending() == ([], [], [])
+    db.close()

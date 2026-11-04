@@ -279,6 +279,20 @@ def test_external_file_changes(app, tmp_path, monkeypatch):
     # saving here is not an external change
     ed.save()
     assert not ed.changed_on_disk()
+    # files that are not open: found by the background scan and re-analyzed
+    util = next(x for x in win.db.files() if x.relpath.endswith("util.c"))
+    with open(util.path, "a", encoding="utf-8") as fh:
+        fh.write("\nint notOpenButChanged(void) { return 7; }\n")
+    with open(os.path.join(os.path.dirname(util.path), "fresh.cpp"), "w", encoding="utf-8") as fh:
+        fh.write("int brandNewFile() { return 1; }\n")
+    win.scan_project_changes()
+    deadline = time.time() + 30
+    while time.time() < deadline and not (win.db.entities(name="brandNewFile") and win.worker is None):
+        app.processEvents()
+        time.sleep(0.02)
+    _wait(app, win)
+    assert win.db.entities(name="notOpenButChanged") and win.db.entities(name="brandNewFile")
+    assert "Files changed on disk" in win.status_label.text() or "Analyzed" in win.status_label.text()
     win.close_project()
     assert not win.watcher.files()
     win.close()

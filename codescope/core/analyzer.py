@@ -262,6 +262,31 @@ class Analyzer:
         return self.stats
 
 
+def pending_changes(cfg, known):
+    """Files an incremental analysis would pick up now: (changed, added, removed) path lists.
+
+    *known* maps the paths of the analyzed files to (lang, size, mtime), as stored in the
+    project.  Uses the same rules as Analyzer.analyze, so a reported change always disappears
+    after the next analysis.
+    """
+    changed, added, wanted = [], [], set()
+    for path, lang in scan_sources(cfg):
+        wanted.add(path)
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        if st.st_size > MAX_FILE_SIZE:
+            continue
+        row = known.get(path)
+        if row is None:
+            added.append(path)
+        elif row[0] != lang or row[1] != st.st_size or abs((row[2] or 0) - st.st_mtime) >= 1e-6:
+            changed.append(path)
+    removed = [p for p in known if p not in wanted]
+    return changed, added, removed
+
+
 def create_project(db_path, name, roots, languages=None, exclude=None) -> Database:
     cfg = {"name": name, "roots": [os.path.abspath(r) for r in roots]}
     if languages:
