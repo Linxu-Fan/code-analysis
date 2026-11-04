@@ -202,11 +202,45 @@ class CodeEditor(QPlainTextEdit):
             text = f"<unable to open {self.path}: {exc}>"
         self.setPlainText(text.replace("\r\n", "\n"))
         self.document().setModified(False)
+        self.disk_signature = self._disk_signature()
 
     def save(self):
         with open(self.path, "w", encoding="utf-8", newline="") as fh:
             fh.write(self.toPlainText())
         self.document().setModified(False)
+        self.disk_signature = self._disk_signature()
+
+    # ---- changes made by other programs ---------------------------------------------
+    def _disk_signature(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return None
+        return st.st_mtime_ns, st.st_size
+
+    def changed_on_disk(self):
+        """True if another program changed the file since it was loaded or saved here."""
+        sig = self._disk_signature()
+        return sig is not None and sig != getattr(self, "disk_signature", None)
+
+    def reload_from_disk(self):
+        """Load the file again, keeping the cursor line/column and the scroll position."""
+        c = self.textCursor()
+        line, col = c.blockNumber(), c.positionInBlock()
+        vpos, hpos = self.verticalScrollBar().value(), self.horizontalScrollBar().value()
+        self.set_semantic([])                 # positions from the old analysis no longer fit
+        self.load()
+        doc = self.document()
+        block = doc.findBlockByNumber(min(line, doc.blockCount() - 1))
+        c = QTextCursor(block)
+        c.setPosition(block.position() + min(col, max(0, block.length() - 1)))
+        self.setTextCursor(c)
+        self.verticalScrollBar().setValue(vpos)
+        self.horizontalScrollBar().setValue(hpos)
+
+    def keep_local_version(self):
+        """Ignore the current version on disk (the user keeps the text being edited)."""
+        self.disk_signature = self._disk_signature()
 
     def indent_unit(self):
         """Indentation step used by this file (2, 3, 4 or 8 columns; tabs count as 4)."""

@@ -224,3 +224,61 @@ def test_visual_studio_font(app, tmp_path, monkeypatch):
     monkeypatch.setitem(theme.current, "editor_font", ("No Such Font 123", 12.0))
     f = CE.mono_font()
     assert f.family() != "No Such Font 123" and f.pointSizeF() == 12.0 and f.fixedPitch()
+
+
+def test_external_file_changes(app, tmp_path, monkeypatch):
+    import os
+    import shutil
+    import time
+
+    from PySide6.QtCore import QSettings
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp_path / "settings"))
+    from PySide6.QtWidgets import QMessageBox
+
+    from codescope.core.analyzer import create_project
+    from codescope.gui.main_window import MainWindow
+
+    from .conftest import SAMPLES
+    src = tmp_path / "src"
+    shutil.copytree(os.path.join(SAMPLES, "cpp"), src)
+    path = str(tmp_path / "x.csdb")
+    create_project(path, "x", [str(src)]).close()
+    win = MainWindow()
+    win.show()
+    win.open_project(path)
+    _wait(app, win)
+    f = next(x for x in win.db.files() if x.relpath.endswith("shape.cpp"))
+    _idx, pane = win.editor_for(f.id)
+    ed = pane.editor
+    assert f.path in win.watcher.files()
+    # another program edits the file: the editor reloads it and the analysis catches up
+    time.sleep(0.02)
+    with open(f.path, "a", encoding="utf-8") as fh:
+        fh.write("\nint addedExternally() { return 42; }\n")
+    os.utime(f.path, None)
+    win.check_external_changes()
+    assert "addedExternally" in ed.toPlainText() and not ed.document().isModified()
+    deadline = time.time() + 30
+    while time.time() < deadline and not win.db.entities(name="addedExternally"):
+        app.processEvents()
+        time.sleep(0.02)
+    _wait(app, win)                                    # the background re-analysis has finished
+    assert win.db.entities(name="addedExternally")
+    assert not any(type(win.tabs.widget(i)).__name__ == "ProjectSummary" and i == win.tabs.currentIndex()
+                   for i in range(win.tabs.count()))          # quiet: the editor stays in front
+    # unsaved edits: ask first, keep them when the user says no
+    ed.insertPlainText("// my edit\n")
+    with open(f.path, "a", encoding="utf-8") as fh:
+        fh.write("// theirs\n")
+    os.utime(f.path, (time.time() + 5, time.time() + 5))
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
+    win.check_external_changes()
+    assert "// my edit" in ed.toPlainText() and "// theirs" not in ed.toPlainText()
+    win.check_external_changes()                       # not asked again for the same version
+    # saving here is not an external change
+    ed.save()
+    assert not ed.changed_on_disk()
+    win.close_project()
+    assert not win.watcher.files()
+    win.close()

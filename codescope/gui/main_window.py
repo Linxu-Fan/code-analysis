@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QFileSystemWatcher, QSettings, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QKeySequence
 from PySide6.QtWidgets import (QApplication, QCompleter, QDockWidget, QFileDialog, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -192,6 +192,14 @@ class MainWindow(QMainWindow):
         self.tabs.setElideMode(Qt.ElideNone)
         self.tabs.setUsesScrollButtons(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
+        # files changed by other programs (another editor, git, a code generator)
+        self.watcher = QFileSystemWatcher(self)
+        self.watcher.fileChanged.connect(self._file_changed_on_disk)
+        self._disk_timer = QTimer(self, singleShot=True, interval=300, timeout=self.check_external_changes)
+        self._reanalyze_timer = QTimer(self, singleShot=True, interval=1000, timeout=self._reanalyze_changed)
+        self._checking_disk = False
+        QApplication.instance().applicationStateChanged.connect(
+            lambda state: state == Qt.ApplicationActive and self._disk_timer.start())
         self.setCentralWidget(self.tabs)
         self.welcome = WelcomePage(self)
         self.tabs.addTab(self.welcome, app_icon(), "Start Page")
@@ -504,6 +512,8 @@ class MainWindow(QMainWindow):
             self.tabs.removeTab(0)
             if w is not self.welcome:
                 w.deleteLater()
+        if self.watcher.files():
+            self.watcher.removePaths(self.watcher.files())
         if self.db is not None:
             self.db.close()
         self.db = None
@@ -598,7 +608,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Failed")
         QMessageBox.critical(self, APP_NAME, msg[:4000])
 
-    def analyze(self, full=False):
+    def analyze(self, full=False, quiet=False):
+        """Re-analyze the project (incrementally unless *full*); *quiet*: no Project Overview tab."""
         if self.db is None:
             return
         path = self.db.path
@@ -615,7 +626,8 @@ class MainWindow(QMainWindow):
             self.reload_views()
             self.status_label.setText(f"Analyzed {st['files']} files ({st['parsed']} parsed, {st['errors']} errors) "
                                       f"in {st['seconds']} s")
-            if not any(isinstance(self.tabs.widget(i), ProjectSummary) for i in range(self.tabs.count())):
+            has_overview = any(isinstance(self.tabs.widget(i), ProjectSummary) for i in range(self.tabs.count()))
+            if not quiet and not has_overview:
                 self.show_overview()
         self.run_task("Analyzing…", job, done)
 
@@ -648,6 +660,8 @@ class MainWindow(QMainWindow):
                 return
             if r == QMessageBox.Save:
                 w.editor.save()
+        if isinstance(w, EditorPane) and w.editor.path in self.watcher.files():
+            self.watcher.removePath(w.editor.path)
         self.tabs.removeTab(idx)
         if w is not self.welcome:
             w.deleteLater()
@@ -703,7 +717,54 @@ class MainWindow(QMainWindow):
         ed.set_semantic(self._semantic_tokens(file_id), *self._type_names())
         idx = self.add_tab(pane, pane.title, icon=kind_icon(M.FILE))
         self.tabs.setTabToolTip(idx, f.path)
+        if f.path not in self.watcher.files():
+            self.watcher.addPath(f.path)
         return idx, pane
+
+    # ---- files changed by other programs ------------------------------------------------------
+    def _file_changed_on_disk(self, path):
+        # editors that save by writing a new file and renaming it end the watch: watch it again
+        if os.path.exists(path) and path not in self.watcher.files():
+            self.watcher.addPath(path)
+        self._disk_timer.start()
+
+    def check_external_changes(self):
+        """Reload open files that another program changed; ask first when they have unsaved edits."""
+        if self._checking_disk:
+            return
+        self._checking_disk = True
+        reloaded = []
+        try:
+            for i in range(self.tabs.count()):
+                pane = self.tabs.widget(i)
+                if not isinstance(pane, EditorPane) or not pane.editor.changed_on_disk():
+                    continue
+                ed = pane.editor
+                if ed.document().isModified():
+                    self.tabs.setCurrentIndex(i)
+                    r = QMessageBox.question(
+                        self, "File changed on disk",
+                        f"{ed.path}\n\nwas changed by another program, and you have unsaved changes here.\n\n"
+                        "Reload it and lose your changes?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                    if r != QMessageBox.Yes:
+                        ed.keep_local_version()
+                        continue
+                ed.reload_from_disk()
+                reloaded.append(pane.title)
+        finally:
+            self._checking_disk = False
+        if reloaded:
+            self.status_label.setText("Reloaded " + ", ".join(reloaded) + " (changed on disk); re-analyzing …")
+            self._reanalyze_timer.start()
+
+    def _reanalyze_changed(self):
+        """Bring the analysis up to date after external changes, without disturbing the work in progress."""
+        if self.db is None:
+            return
+        if self.worker is not None:
+            self._reanalyze_timer.start(3000)        # try again when the running task has finished
+            return
+        self.analyze(quiet=True)
 
     def _semantic_tokens(self, file_id):
         """(line, col, name, kind) for every resolved reference and declaration in a file."""
