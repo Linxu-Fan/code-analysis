@@ -191,3 +191,36 @@ def test_editor_visual_studio_highlighting(app, cpp_db):
     ed.zoom_reset()
     pane.grab()
     theme.current["editor_scheme"] = "auto"
+
+
+VSSETTINGS = ('<?xml version="1.0" encoding="utf-8"?><UserSettings><Category name="Environment_FontsAndColors">'
+              '<FontsAndColors Version="2.0"><Categories>'
+              '<Category GUID="{58E96763-1D3B-4E05-B6BA-FF7115FD0B7B}" FontName="Segoe UI" FontSize="9" />'
+              '<Category GUID="{A27B4E24-A735-4D1D-B8E7-9716E1E3D8E0}" FontName="{font}" FontSize="{size}" '
+              'CharSet="1" FontIsDefault="No"><Items /></Category></Categories></FontsAndColors></Category>'
+              '</UserSettings>')
+
+
+def test_visual_studio_font(app, tmp_path, monkeypatch):
+    import time
+
+    from codescope.gui import code_editor as CE
+    from codescope.gui import theme
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert CE.visual_studio_font() is None                     # Visual Studio not installed
+    old = tmp_path / "Microsoft" / "VisualStudio" / "16.0_abc" / "Settings"
+    new = tmp_path / "Microsoft" / "VisualStudio" / "17.0_def" / "Settings"
+    old.mkdir(parents=True)
+    new.mkdir(parents=True)
+    (old / "CurrentSettings.vssettings").write_text(VSSETTINGS.replace("{font}", "Consolas").replace("{size}", "11"))
+    time.sleep(0.05)
+    # Visual Studio writes UTF-8 or UTF-16 files; the newest version's settings win
+    (new / "CurrentSettings.vssettings").write_bytes(
+        VSSETTINGS.replace("{font}", "Cascadia Mono").replace("{size}", "10.5").encode("utf-16"))
+    assert CE.visual_studio_font() == ("Cascadia Mono", 10.5)
+    (new / "CurrentSettings.vssettings").write_text("<UserSettings/>")
+    assert CE.visual_studio_font() == ("Consolas", 11.0)
+    assert not CE._installed("No Such Font 123")
+    monkeypatch.setitem(theme.current, "editor_font", ("No Such Font 123", 12.0))
+    f = CE.mono_font()
+    assert f.family() != "No Such Font 123" and f.pointSizeF() == 12.0 and f.fixedPitch()

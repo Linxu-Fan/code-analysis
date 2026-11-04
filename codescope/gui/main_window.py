@@ -338,6 +338,7 @@ class MainWindow(QMainWindow):
             a.setChecked(theme.current.get("editor_scheme", "auto") == key)
             self.scheme_actions.append(a)
         m.addAction("Editor Font\u2026", self.choose_editor_font)
+        m.addAction("Use Visual Studio Font", self.use_vs_font)
         zm = m.addMenu("Editor Zoom")
         zm.addAction("Zoom In", lambda: self._editor_zoom(1), QKeySequence.ZoomIn)
         zm.addAction("Zoom Out", lambda: self._editor_zoom(-1), QKeySequence.ZoomOut)
@@ -750,6 +751,16 @@ class MainWindow(QMainWindow):
             self.settings.setValue("editorFont", f"{font.family()}|{font.pointSizeF()}")
             for ed in self._editors():
                 ed.set_editor_font(mono_font())
+
+    def use_vs_font(self):
+        """Forget the font chosen in Editor Font… and use Visual Studio's editor font again."""
+        from .code_editor import mono_font
+        theme.current["editor_font"] = None
+        self.settings.remove("editorFont")
+        f = mono_font()
+        for ed in self._editors():
+            ed.set_editor_font(f)
+        self.status_label.setText(f"Editor font: {f.family()}, {f.pointSizeF():g} pt")
 
     def _editor_zoom(self, delta):
         w = self.tabs.currentWidget()

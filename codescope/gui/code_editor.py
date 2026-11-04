@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QKeySequence, QPainter, QPen, QShortcut,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontInfo, QKeySequence, QPainter, QPen, QShortcut,
                            QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLineEdit, QMenu, QPlainTextEdit, QTextEdit,
                                QToolButton, QVBoxLayout, QWidget)
@@ -14,19 +14,63 @@ from ..core.languages import LANGUAGES
 from . import theme
 
 
-EDITOR_FONTS = ("Cascadia Mono", "Consolas", "Cascadia Code", "JetBrains Mono", "Menlo", "DejaVu Sans Mono")
+EDITOR_FONTS = ("Cascadia Mono", "Consolas", "Cascadia Code", "JetBrains Mono", "Menlo", "DejaVu Sans Mono",
+                "Courier New")
+# Visual Studio's "Text Editor" entry in Tools > Options > Fonts and Colors
+_VS_TEXT_EDITOR = "{A27B4E24-A735-4D1D-B8E7-9716E1E3D8E0}"
+
+
+def visual_studio_font():
+    """(family, size) of the Visual Studio text editor font, read from the settings file of the most
+    recently used Visual Studio version; None if Visual Studio is not installed or uses its default."""
+    import glob
+    import re
+    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "VisualStudio")
+    paths = glob.glob(os.path.join(base, "*", "Settings", "CurrentSettings*.vssettings"))
+    for path in sorted(paths, key=os.path.getmtime, reverse=True):
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        text = data.decode("utf-16") if data[:2] in (b"\xff\xfe", b"\xfe\xff") else data.decode("utf-8", "replace")
+        m = re.search(r'<Category\s[^>]*GUID="' + re.escape(_VS_TEXT_EDITOR) + r'"[^>]*>', text, re.I)
+        if not m:
+            continue
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', m.group(0)))
+        if attrs.get("FontName"):
+            try:
+                size = float(attrs.get("FontSize") or 10)
+            except ValueError:
+                size = 10.0
+            return attrs["FontName"], size
+    return None
+
+
+def _installed(family):
+    """True if *family* really resolves to that font (not to a substitute such as NSimSun)."""
+    if not family:
+        return False
+    f = QFont(family)
+    return QFontInfo(f).family().lower() == family.lower() or \
+        family.lower() in (x.lower() for x in QFontDatabase.families())
 
 
 def mono_font(size=None):
-    """Editor font: the user's choice, else Visual Studio's default (Cascadia Mono / Consolas, 10 pt)."""
+    """Editor font: the user's choice, else the font Visual Studio uses (its Fonts and Colors
+    setting, by default Cascadia Mono / Consolas, 10 pt)."""
     family, psize = theme.current.get("editor_font") or (None, None)
-    f = QFontDatabase.systemFont(QFontDatabase.FixedFont)
-    families = QFontDatabase.families()
-    for fam in ((family,) if family else ()) + EDITOR_FONTS:
-        if fam and fam in families:
-            f = QFont(fam)
-            break
-    f.setPointSizeF(float(size or psize or 10))
+    vs = visual_studio_font() if os.name == "nt" else None
+    candidates = ((family,) if family else ()) + ((vs[0],) if vs else ()) + EDITOR_FONTS
+    chosen = next((fam for fam in candidates if _installed(fam)), None)
+    if chosen:
+        f = QFont(chosen)
+    elif os.name == "nt":
+        f = QFont("Consolas")         # never the system fixed font (NSimSun on Chinese Windows)
+    else:
+        f = QFontDatabase.systemFont(QFontDatabase.FixedFont)
+    default_size = vs[1] if vs and chosen == vs[0] else 10
+    f.setPointSizeF(float(size or psize or default_size))
     f.setStyleHint(QFont.Monospace)
     f.setFixedPitch(True)
     f.setStyleStrategy(QFont.PreferAntialias)
