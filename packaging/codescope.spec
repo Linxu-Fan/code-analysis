@@ -17,9 +17,7 @@ for mod in ("tree_sitter", "tree_sitter_c", "tree_sitter_cpp", "tree_sitter_pyth
 hidden = ["tree_sitter_c", "tree_sitter_cpp", "tree_sitter_python",
           "codescope.core.extract.python", "codescope.core.extract.cfamily",
           "pygments.lexers.c_cpp", "pygments.lexers.python", "pygments.formatters.html",
-          "pygments.styles.default",
-          # AI assistant: imported lazily; ssl is needed to download llama.cpp over HTTPS
-          "codescope.core.assistant", "codescope.core.ai_setup", "codescope.gui.ai_panel", "ssl"]
+          "pygments.styles.default"]
 excludes = ["tkinter", "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtQml",
             "PySide6.QtQuick", "PySide6.Qt3DCore", "PySide6.QtMultimedia", "PySide6.QtCharts",
             "PySide6.QtDataVisualization", "PySide6.QtPdf", "PySide6.QtBluetooth", "PySide6.QtNetwork",

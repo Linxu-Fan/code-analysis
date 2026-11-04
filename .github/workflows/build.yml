@@ -54,27 +54,6 @@ jobs:
           ./dist/CodeScope/codescope-cli.exe graph smoke.csdb main -t control -o cfg.svg
           ./dist/CodeScope/codescope-cli.exe report smoke.csdb -o smoke_report -q
           test -f smoke_report/index.html
-      - name: Smoke test the AI assistant (frozen CLI against a mock server)
-        shell: bash
-        run: |
-          set -e
-          python - <<'PY'
-          import subprocess, sys
-          from tests.ai_mock import MockLLM
-          script = [{"tool_calls": [("describe", {"name": "geo::Rect"})]}, {"content": "Rect is a Shape."}]
-          with MockLLM(script) as llm:
-              out = subprocess.run(["dist/CodeScope/codescope-cli.exe", "ask", "smoke.csdb", "What is Rect?",
-                                    "--url", llm.url], capture_output=True, text=True, timeout=120)
-              print(out.stdout, out.stderr)
-              assert out.returncode == 0 and "Rect is a Shape." in out.stdout, "ask failed"
-          PY
-      - name: Check llama.cpp release downloads (GitHub API over HTTPS from the frozen CLI)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -e
-          python -c "from tests.test_ai_setup import write_gguf; write_gguf('tiny.gguf', {'general.architecture': 'qwen3moe', 'qwen3moe.block_count': 40, 'qwen3moe.expert_count': 128}, pad=4096)"
-          for b in cuda vulkan cpu; do ./dist/CodeScope/codescope-cli.exe ai-setup tiny.gguf --backend $b --dry-run; done
       - name: Smoke test the GUI executable
         shell: pwsh
         run: |

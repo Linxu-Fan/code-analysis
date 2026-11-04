@@ -140,23 +140,6 @@ def _draw(name, p, fg, accent):
         _pen(p, accent)
         for y in (8, 12, 16):
             p.drawLine(QPointF(8.5, y), QPointF(15.5 if y != 16 else 12.5, y))
-    elif name == "ai":
-        # chat bubble with a sparkle
-        bubble = QPainterPath()
-        bubble.addRoundedRect(QRectF(2.5, 4, 15, 11), 3, 3)
-        p.drawPath(bubble)
-        p.drawPolyline(QPolygonF([QPointF(6, 15), QPointF(5, 19), QPointF(10, 15)]))
-        _pen(p, accent, 1.5)
-        star = QPainterPath()
-        cx, cy, r = 18.5, 6.5, 4.2
-        star.moveTo(cx, cy - r)
-        star.quadTo(cx, cy, cx + r, cy)
-        star.quadTo(cx, cy, cx, cy + r)
-        star.quadTo(cx, cy, cx - r, cy)
-        star.quadTo(cx, cy, cx, cy - r)
-        p.setBrush(QColor(accent))
-        p.drawPath(star)
-        p.setBrush(Qt.NoBrush)
     elif name == "settings":
         p.drawEllipse(QPointF(12, 12), 3, 3)
         for k in range(8):

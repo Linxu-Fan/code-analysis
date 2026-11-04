@@ -364,128 +364,6 @@ def cmd_modtree(a):
         print(to_text(tree))
 
 
-def cmd_ask(a):
-    from .core import assistant as A
-    settings = A.load_settings()
-    for key in ("url", "model"):
-        if getattr(a, key):
-            settings[key] = getattr(a, key)
-    if a.no_tools:
-        settings["tools"] = False
-    if a.save:
-        A.save_settings(settings)
-    client = A.LLMClient(settings["url"], settings["model"], settings["api_key"], settings["timeout"])
-    if a.list_models or a.question is None:
-        try:
-            models = client.models()
-        except A.LLMError as exc:
-            sys.exit(f"error: {exc}")
-        print(f"AI server {client.url} is running. Models: " + (", ".join(models) or "(none listed)"))
-        if a.question is None:
-            return
-    db = _open(a.db)
-    asst = A.Assistant(db, settings, client)
-    state = {"thinking": False}
-
-    def on_event(kind, data):
-        if kind == "reasoning" and a.reasoning:
-            sys.stderr.write(data)
-            state["thinking"] = True
-        elif kind == "content":
-            if state["thinking"]:
-                sys.stderr.write("\n")
-                state["thinking"] = False
-            sys.stdout.write(data)
-            sys.stdout.flush()
-        elif kind == "tool":
-            name, args = data
-            sys.stderr.write(f"\n[{name}] " + ", ".join(f"{k}={v!r}" for k, v in args.items()) + "\n")
-        elif kind == "notice":
-            sys.stderr.write(f"\nNote: {data}\n")
-        sys.stderr.flush()
-
-    try:
-        asst.ask(a.question, on_event)
-    except A.LLMError as exc:
-        sys.exit(f"\nerror: {exc}")
-    except KeyboardInterrupt:
-        sys.exit("\ninterrupted")
-    print()
-
-
-def cmd_ai_setup(a):
-    import time
-
-    from .core import ai_setup as S
-    from .core import assistant as A
-    try:
-        info = S.gguf_info(a.model)
-    except (OSError, ValueError) as exc:
-        sys.exit(f"error: {exc}")
-    hw = S.detect_hardware()
-    backend = S.choose_backend(hw) if a.backend == "auto" else a.backend
-    print(S.describe_hardware(hw))
-    print(f"llama.cpp build: {backend}")
-    if a.dry_run:
-        try:
-            releases = S.fetch_releases()
-        except Exception as exc:  # noqa: BLE001
-            sys.exit(f"error: cannot read the llama.cpp releases from GitHub: {exc}")
-        release, assets = S.find_release(releases, backend, hw["cuda"])
-        if release is None:
-            sys.exit(f"error: no recent llama.cpp release has a Windows {backend} build")
-        print(f"Would download from llama.cpp {release.get('tag_name')}: " + ", ".join(n for n, _ in assets))
-        args, notes = S.plan(info, hw, backend, a.ctx)
-        for n in notes:
-            print(n)
-        print("llama-server " + " ".join(["-m", a.model] + args))
-        return
-    server = a.server
-    if server is None:
-        installed = S.find_server(os.path.join(A.config_dir(), "llama.cpp")) \
-            if os.path.isdir(os.path.join(A.config_dir(), "llama.cpp")) else None
-        if installed and a.no_download:
-            server = installed
-        elif a.no_download or not S.platform_supported():
-            sys.exit("error: give the llama-server program with --server (on Linux/macOS install llama.cpp, "
-                     "e.g. 'brew install llama.cpp', or build it from https://github.com/ggml-org/llama.cpp)")
-        else:
-            def progress(done, total):
-                if total:
-                    sys.stdout.write(f"\r  {done / 1048576:.0f} / {total / 1048576:.0f} MiB")
-                    sys.stdout.flush()
-                    if done >= total:
-                        print()
-            try:
-                server = S.install_llama_cpp(backend, hw["cuda"], log=print, progress=progress)
-            except Exception as exc:  # noqa: BLE001
-                sys.exit(f"error: download failed: {type(exc).__name__}: {exc}\nDownload llama.cpp yourself from "
-                         "https://github.com/ggml-org/llama.cpp/releases and pass --server PATH.")
-    args, notes = S.plan(info, hw, backend, a.ctx)
-    print()
-    for n in notes:
-        print(n)
-    script = S.write_start_script(server, os.path.abspath(a.model), args, a.port)
-    settings = A.load_settings()
-    settings["url"] = f"http://127.0.0.1:{a.port}/v1"
-    A.save_settings(settings)
-    print(f"\nStart script: {script}")
-    print(f"The AI Assistant now uses {settings['url']}")
-    if not a.start:
-        print("Run the start script (keep its window open), then ask questions in CodeScope (AI > AI Assistant).")
-        return
-    S.start_server(script)
-    print("Starting the server; loading the model can take a few minutes …")
-    client = A.LLMClient(settings["url"])
-    for _ in range(600):
-        try:
-            print("Ready. Models: " + ", ".join(client.models(timeout=5)))
-            return
-        except A.LLMError:
-            time.sleep(1)
-    sys.exit("error: the server did not answer within 10 minutes; check its window for errors")
-
-
 def cmd_gui(a):
     from .gui.app import main as gui_main
     return gui_main([a.db] if a.db else [])
@@ -611,29 +489,6 @@ def build_parser():
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_classtree)
 
-    s = sub.add_parser("ask", help="ask the AI assistant (a local LLM server) about the project")
-    s.add_argument("db")
-    s.add_argument("question", nargs="?", help="question; omit to only test the connection")
-    s.add_argument("--url", help="OpenAI-compatible server URL (default http://127.0.0.1:8080/v1)")
-    s.add_argument("--model", help="model name (default: whatever the server has loaded)")
-    s.add_argument("--save", action="store_true", help="remember --url/--model for the GUI and later calls")
-    s.add_argument("--list-models", action="store_true", help="show the models the server offers")
-    s.add_argument("--no-tools", action="store_true", help="do not let the model call CodeScope's tools")
-    s.add_argument("--reasoning", action="store_true", help="also print the model's reasoning (to stderr)")
-    s.set_defaults(fn=cmd_ask)
-
-    s = sub.add_parser("ai-setup", help="set up a local AI server (llama.cpp) for a GGUF model")
-    s.add_argument("model", help="the .gguf model file")
-    s.add_argument("--backend", choices=("auto", "cuda", "vulkan", "cpu"), default="auto",
-                   help="llama.cpp build to download (auto: CUDA for NVIDIA, Vulkan for AMD/Intel GPUs)")
-    s.add_argument("--server", help="use this llama-server program instead of downloading llama.cpp")
-    s.add_argument("--no-download", action="store_true", help="never download; use an installed llama.cpp")
-    s.add_argument("--port", type=int, default=8080)
-    s.add_argument("--ctx", type=int, default=32768, help="context window in tokens (default 32768)")
-    s.add_argument("--start", action="store_true", help="start the server now and wait until it is ready")
-    s.add_argument("--dry-run", action="store_true", help="only show what would be downloaded and the plan")
-    s.set_defaults(fn=cmd_ai_setup)
-
     s = sub.add_parser("modtree", help="where and in which order a class/struct (or one member) is modified")
     s.add_argument("db")
     s.add_argument("name", help="class or struct, or a member such as Body::mass")
@@ -652,7 +507,7 @@ def build_parser():
 
 
 def main(argv=None):
-    # tree output and model answers contain characters a legacy Windows console code page cannot encode
+    # tree output contains characters (├ └ ← …) a legacy Windows console code page cannot encode
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure") and (stream.encoding or "").lower() not in ("utf-8", "utf8"):
             try:
