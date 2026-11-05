@@ -19,7 +19,7 @@ from .resolver import link
 
 MAX_FILE_SIZE = 8 * 1024 * 1024
 # Bump when the extractors record new information, so existing projects are fully re-parsed.
-EXTRACTOR_VERSION = "2"
+EXTRACTOR_VERSION = "4"
 
 
 class Cancelled(Exception):

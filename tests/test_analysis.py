@@ -429,6 +429,225 @@ def test_modification_tree_whole_object(tmp_path):
     db.close()
 
 
+FIELD_CPP = """
+#include <memory>
+#include <vector>
+template <typename S> struct JointT { S damping{S(0)}; S other = 1; };
+using Joint = JointT<double>;
+struct Elastic : JointT<double> { };
+struct Builder { std::vector<Joint> joints; Joint root; };
+void convert(double v, double& out, const double& in);
+void readOnly(const double& d);
+void viaPointer(double* p);
+double& field(Joint& j) { return j.damping; }
+const double& field(const Joint& j) { return j.damping; }
+void compile(Joint& result) {
+    result = JointT<double>{};
+    convert(1.0, result.damping, result.other);
+    readOnly(result.other);
+}
+void tune(Builder& b) { field(b.joints[0]) = 2; viaPointer(&b.root.other); }
+void local() { auto set = [](double& d) { d = 1; }; Joint j; set(j.other); }
+void noObject(Joint* p, Joint& r);
+int main() {
+    Joint j;
+    compile(j);
+    Builder b;
+    b.joints.push_back(j);
+    b.joints.clear();
+    b.joints[0].other = 1;
+    tune(b);
+    auto e = std::make_unique<Elastic>();
+    return 0;
+}
+"""
+
+
+def test_field_tree(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_field_tree, build_modify_tree, find_fields, layout_call_tree, to_svg, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "f.cpp").write_text(FIELD_CPP)
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+    damping, = find_fields(db, "JointT.damping")
+    assert find_fields(db, "JointT::damping") == [damping] and find_fields(db, "damping") == [damping]
+    assert damping.signature == "S damping{S(0)}"
+    other, = find_fields(db, "other")
+
+    def sets(field):
+        return {(db.entity(r.src_id).name, r.via) for r in db.refs_to(field.id, [M.SET])}
+    # a non-const reference or pointer parameter writes; a const reference does not
+    assert sets(damping) == {("compile", "convert"), ("tune", "field")}
+    assert sets(other) == {("tune", "viaPointer"), ("local", ""), ("main", "")}
+
+    t = build_field_tree(db, damping)
+    assert t.root.via == "JointT::damping" and t.lifecycle
+    declared = t.down[0]
+    assert declared.rel == "declare" and "S damping{S(0)}" in declared.via and declared.call_line == damping.line
+    steps = [(n.step, n.rel, n.writes[0][0]) for n in t.nodes() if n.step]
+    assert steps == [(1, "create", "Joint j"), (2, "create", "JointT"), (3, "write", "damping through convert()"),
+                     (4, "create", "JointT in joints[]"), (5, "write", "damping through field()"),
+                     (6, "create", "Elastic"), (7, "create", "Joint j")]   # the last one is in local()
+    assert [c.entity.name for c in t.down[1].children if not c.step] == ["compile", "tune"]
+    text = to_text(t)
+    assert "#3  sets damping through convert()" in text and "#4  stores JointT in joints[]" in text
+    assert "#1  creates Joint j" in text and "declared: S damping{S(0)}" in text
+    layout_call_tree(t)
+    assert "#6  creates Elastic" in to_svg(t, "damping")
+
+    plain = build_field_tree(db, damping, creations=False)
+    assert plain.creations == 0 and plain.writers == 2
+    assert [n.step for n in plain.nodes() if n.step] == [1, 2]
+    flat = build_field_tree(db, damping, paths=False)
+    assert sorted(n.entity.name for n in flat.down[1:]) == ["compile", "local", "main", "tune"]
+    # the ordinary modification tree sees the new writes, but no creations
+    mod = build_modify_tree(db, one(db, "JointT"), damping)
+    assert mod.writers == 2 and not any(n.rel == "create" for n in mod.nodes())
+    # relinking replaces the writes made by the linker instead of adding them twice
+    from codescope.core.resolver import link
+    before = len(db.refs_to(damping.id, [M.SET]))
+    link(db)
+    assert len(db.refs_to(damping.id, [M.SET])) == before
+    db.close()
+
+
+ALIAS_CPP = """
+#include <vector>
+struct Inner { double v; double w; };
+struct Other { double v; double w; };
+struct Box {
+    double a, b, c, d, e, f, g, h, i, j, k, m, n;
+    double unwritten;
+    Inner in;
+    Inner replaced;
+    Inner partly;
+    std::vector<Inner> items;
+    std::vector<Inner> grown;
+    std::vector<Inner> cleared;
+};
+double& pick(Box& b) { return b.g; }
+double& pickAlias(Box& b) { auto& r = b.n; return r; }
+void convert(double& out);
+void fill(double* out);
+void viaAuto(Box& b) { auto& d = b.a; d = 1; }
+void viaTyped(Box& b) { double& d = b.b; d += 1; }
+void viaPointer(Box& b) { double* p = &b.c; *p = 1; }
+void viaOutArg(Box& b) { auto& d = b.d; convert(d); }
+void viaPointerArg(Box& b) { double* p = &b.e; fill(p); }
+void viaChain(Box& b) { auto& x = b.f; auto& y = x; y = 1; }
+void viaReturned(Box& b) { auto& r = pick(b); r = 1; }
+void viaBranch(Box& b, bool c) { auto& r = c ? b.h : b.i; r++; }
+void viaLatePointer(Box& b, bool c) { double* p = nullptr; if (c) p = &b.j; else p = &b.k; *p = 1; }
+void viaCopiedPointer(Box& b) { double* p = &b.m; double* q = p; *q = 1; }
+void viaObject(Box& b) { auto& o = b.in; o.v = 1; }
+void viaLoop(Box& b) { for (auto& x : b.items) x.w = 2; }
+void replaceAll(Box& b) { auto& o = b.replaced; o = Inner{}; }
+void replacePart(Box& b) { auto& o = b.partly; o.v = 1; }
+void grow(Box& b) { auto& l = b.grown; l.push_back(Inner{}); }
+void clear(Box& b) { auto& l = b.cleared; l.clear(); }
+void noWrites(Box& b, double& out) {
+    const auto& ca = b.unwritten;
+    out = ca;
+    auto copy = b.unwritten;
+    copy = 3;
+    double& read = b.unwritten;
+    out = read;
+    const double* cp = &b.unwritten;
+    out = *cp;
+    double* moved = &b.unwritten;
+    out = *moved;
+    moved = nullptr;
+    for (const auto& x : b.items) out = x.v;
+    for (auto x : b.items) x.v = 3;
+}
+void hidden(Box& b) { double t = 0; { auto& t = b.unwritten; (void)t; } t = 2; }
+void ended(Box& b) { { auto& t = b.unwritten; (void)t; } double t = 0; t = 2; }
+"""
+
+
+def test_writes_through_local_aliases(tmp_path):
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_field_tree, build_modify_tree, find_fields, holder_paths, to_text
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "a.cpp").write_text(ALIAS_CPP)
+    db = create_project(str(tmp_path / "c.csdb"), "c", [str(src)])
+    Analyzer(db).analyze()
+
+    def field(name):
+        return find_fields(db, name)[0]
+
+    def writers(name):
+        return {(db.entity(r.src_id).name, r.via, r.alias) for r in db.refs_to(field(name).id, [M.SET])}
+    assert writers("Box.a") == {("viaAuto", "", "d")}
+    assert writers("Box.b") == {("viaTyped", "", "d")}
+    assert writers("Box.c") == {("viaPointer", "", "p")}
+    assert writers("Box.d") == {("viaOutArg", "convert", "")}
+    assert writers("Box.e") == {("viaPointerArg", "fill", "")}
+    assert writers("Box.f") == {("viaChain", "", "y")}
+    assert writers("Box.g") == {("viaReturned", "pick", "")}
+    assert writers("Box.h") == {("viaBranch", "", "r")} and writers("Box.i") == {("viaBranch", "", "r")}
+    assert writers("Box.j") == {("viaLatePointer", "", "p")} and writers("Box.k") == {("viaLatePointer", "", "p")}
+    assert writers("Box.m") == {("viaCopiedPointer", "", "q")}
+    assert ("pickAlias", "n") in {(db.entity(r.src_id).name, r.name) for r in db._refs(
+        "SELECT id, kind, src_id, dst_id, name, qualifier, file_id, line, col FROM refs WHERE kind=?", (M.EXPOSE,))}
+    # 'v' and 'w' also exist in Other: only the expression behind the auto alias tells which is meant
+    assert ("viaObject", "", "") in writers("Inner.v") and not writers("Other.v")
+    assert ("viaLoop", "", "") in writers("Inner.w") and not writers("Other.w")
+    assert writers("Box.in") == {("viaObject", "", "o")}
+    # bound but never written, const, copies, and same-named plain locals
+    assert writers("Box.unwritten") == set()
+
+    tree = build_field_tree(db, field("Box.a"))
+    assert "#1  sets a through d" in to_text(tree)
+    assert [n.step for n in build_field_tree(db, field("Box.d")).nodes() if n.step] == [1]
+
+    # a whole object replaced through an alias is a replacement; writing one member is not
+    inner = one(db, "Inner")
+    assert {"in", "replaced", "partly"} <= {p for _, p in holder_paths(db, inner)}
+    whole = [n for n in build_modify_tree(db, inner).nodes() if n.rel == "write" and any(w for _, _, w in n.writes)]
+    assert {name for n in whole for name, _, w in n.writes if w} == {"replaced"}
+    # an element added through an alias is stored; clearing the container stores nothing
+    stored = [w[0] for n in build_field_tree(db, field("Inner.v")).nodes() if n.rel == "create" for w in n.writes
+              if w[2] == "store"]
+    assert stored == ["Inner in grown[]"]
+
+    # alias writes are stored at the alias: position lookups must still find the alias itself
+    f = next(x for x in db.files() if x.relpath.endswith("a.cpp"))
+    line = next(i for i, l in enumerate(ALIAS_CPP.split("\n"), 1) if "viaAuto" in l)
+    col = ALIAS_CPP.split("\n")[line - 1].index("d = 1") + 1
+    assert db.entity_at(f.id, line, col).kind == M.LOCAL
+    db.close()
+
+
+def test_field_tree_python_and_old_database(tmp_path):
+    import sqlite3
+
+    from codescope.core.analyzer import create_project
+    from codescope.core.calltree import build_field_tree, find_fields, to_text
+    from codescope.core.database import Database
+    src = tmp_path / "s"
+    src.mkdir()
+    (src / "store.py").write_text(MODIFY_PY)
+    path = str(tmp_path / "c.csdb")
+    db = create_project(path, "c", [str(src)])
+    Analyzer(db).analyze()
+    items, = find_fields(db, "Store.items")
+    t = build_field_tree(db, items)
+    assert "Store.items" in to_text(t) and any(n.rel == "create" for n in t.nodes())
+    db.close()
+    # a project made before the detail column existed still opens
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE refs DROP COLUMN detail")
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    assert db.refs_to(items.id, [M.SET])[0].detail == ""
+    db.close()
+
+
 MEMBERS_CPP = """
 #include <vector>
 #include <memory>

@@ -344,8 +344,8 @@ class InfoBrowser(QTreeWidget):
             self._prop("Signature", e.signature, tip=e.signature)
         if e.type:
             self._prop("Type", e.type)
-        if e.modifiers:
-            self._prop("Modifiers", e.modifiers)
+        if M.shown_modifiers(e.modifiers):
+            self._prop("Modifiers", M.shown_modifiers(e.modifiers))
         if e.file_id:
             self._prop("Defined in", self._loc(e.file_id, e.line), file_id=e.file_id, line=e.line)
         for d in db.declarations(e.id):

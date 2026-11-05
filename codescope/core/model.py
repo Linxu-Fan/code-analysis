@@ -61,13 +61,48 @@ TYPED = "Typed"
 INCLUDE = "Include"
 IMPORT = "Import"
 CREATE = "Create"      # object instantiation (new Foo / Foo())
+OBJECT = "Object"      # object defined by a declaration (Foo x; Foo x = y;), Foo{} or make_unique<Foo>()
 
-REF_KINDS = [CALL, USE, SET, INHERIT, IMPLEMENT, TYPED, INCLUDE, IMPORT, CREATE]
+REF_KINDS = [CALL, USE, SET, INHERIT, IMPLEMENT, TYPED, INCLUDE, IMPORT, CREATE, OBJECT]
+
+# Facts recorded for the linker only.  These references never get a target: the linker turns
+# them into Set references once it knows the called function (see Linker._resolve_writes).
+OUT_ARG = "OutArg"         # a name passed as a call argument; detail: index, count, r/p, callee, qualifier
+EXPOSE = "Expose"          # a name returned by a function that returns a non-const reference
+WRITE_CALL = "WriteCall"   # f(x) = value: writes through the reference f returns; detail: argument count
+LINKER_REF_KINDS = (OUT_ARG, EXPOSE, WRITE_CALL)
+VIA_PREFIX = "via\t"       # detail of a Set made by the linker: followed by the name of the called function
+# Detail part of a write made through a local alias (auto& d = j.damping; d = 1;): the alias name, then
+# how it was written: "" the alias itself, "part" a member or element of it, or the name of a mutating call.
+# Such a reference is stored at the position of the alias, so its name does not match the source text there.
+ALIAS_PREFIX = "alias\t"
+ALIAS_LIKE = "%" + ALIAS_PREFIX + "%"
+
+OUT_TOKEN = "out="         # modifier of a function: its writable parameters, e.g. out=r3,p5
+
+
+def out_token(params) -> str:
+    """Modifier text for writable parameters such as ['r3', 'p5'] ('' when there are none)."""
+    return OUT_TOKEN + ",".join(params) if params else ""
+
+
+def out_params(modifiers) -> frozenset:
+    """Writable parameters stored in a modifiers string: {'r3', 'p5'}."""
+    for m in (modifiers or "").split():
+        if m.startswith(OUT_TOKEN):
+            return frozenset(m[len(OUT_TOKEN):].split(","))
+    return frozenset()
+
+
+def shown_modifiers(modifiers) -> str:
+    """Modifiers for display: without the internal out= token."""
+    return " ".join(m for m in (modifiers or "").split() if not m.startswith(OUT_TOKEN))
 
 # Which entity kinds a reference of a given kind may legally target.
 TARGETS = {
     CALL: FUNCTION_KINDS | {MACRO, CLASS, STRUCT},
     CREATE: CLASS_KINDS | {CONSTRUCTOR},
+    OBJECT: CLASS_KINDS | {TYPEDEF},
     USE: VARIABLE_KINDS | FUNCTION_KINDS | {MACRO} | CLASS_KINDS | {TYPEDEF} | SCOPE_KINDS,
     SET: VARIABLE_KINDS,
     INHERIT: CLASS_KINDS,
@@ -92,6 +127,7 @@ UNRESOLVED_FOR = {
 REF_LABELS = {
     CALL: ("Calls", "Called By"),
     CREATE: ("Creates", "Created By"),
+    OBJECT: ("Defines Objects Of", "Objects Defined By"),
     USE: ("Uses", "Used By"),
     SET: ("Sets", "Set By"),
     INHERIT: ("Base Classes", "Derived Classes"),
@@ -128,6 +164,7 @@ class XRef:
     qualifier: str
     line: int
     col: int
+    detail: str = ""       # extra data; its meaning depends on the kind (see the kinds above)
 
 
 @dataclass

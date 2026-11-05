@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from . import model as M
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS entities(
     signature TEXT, modifiers TEXT, type TEXT, owner TEXT, alias_of INTEGER);
 CREATE TABLE IF NOT EXISTS refs(
     id INTEGER PRIMARY KEY, kind TEXT, src_id INTEGER, dst_id INTEGER,
-    name TEXT, qualifier TEXT, file_id INTEGER, line INTEGER, col INTEGER);
+    name TEXT, qualifier TEXT, file_id INTEGER, line INTEGER, col INTEGER, detail TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS metrics(
     entity_id INTEGER, name TEXT, value REAL, PRIMARY KEY(entity_id, name)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS ix_ent_name ON entities(name);
@@ -37,6 +37,7 @@ CREATE INDEX IF NOT EXISTS ix_ref_file ON refs(file_id, line);
 
 ENTITY_COLS = ("id, kind, name, longname, lang, file_id, parent_id, line, col, end_line, end_col, "
                "signature, modifiers, type, owner, alias_of")
+REF_COLS = "id, kind, src_id, dst_id, name, qualifier, file_id, line, col, detail"
 
 
 @dataclass
@@ -80,6 +81,25 @@ class Ref:
     file_id: int
     line: int
     col: int
+    detail: str = ""
+
+    @property
+    def via(self) -> str:
+        """Function through which this Set writes (output argument, returned reference), or ''."""
+        d = self.detail or ""
+        return d[len(M.VIA_PREFIX):].split("\t", 1)[0] if d.startswith(M.VIA_PREFIX) else ""
+
+    @property
+    def alias(self) -> str:
+        """Local reference or pointer through which this Set writes, or ''."""
+        d = self.detail or ""
+        return d[len(M.ALIAS_PREFIX):].split("\t", 1)[0] if d.startswith(M.ALIAS_PREFIX) else ""
+
+    @property
+    def alias_how(self) -> str:
+        """How an alias was written: '' the alias itself, 'part' a member or element, or a mutating call."""
+        parts = (self.detail or "").split("\t")
+        return parts[2] if self.alias and len(parts) > 2 else ""
 
 
 @dataclass
@@ -118,6 +138,10 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        if not any(r[1] == "detail" for r in self.conn.execute("PRAGMA table_info(refs)")):
+            # project made by an older version; the next analysis fills the column (EXTRACTOR_VERSION)
+            self.conn.execute("ALTER TABLE refs ADD COLUMN detail TEXT DEFAULT ''")
+            self.set_meta("schema", str(SCHEMA_VERSION))
         self._ent_cache = {}
         self._file_cache = {}
         if create:
@@ -236,8 +260,9 @@ class Database:
         c.executemany("INSERT INTO entities(id, kind, name, longname, lang, file_id, parent0, parent_id, line, "
                       "col, end_line, end_col, signature, modifiers, type, owner) "
                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
-        c.executemany("INSERT INTO refs(kind, src_id, name, qualifier, file_id, line, col) VALUES(?,?,?,?,?,?,?)",
-                      [(r.kind, ids[r.src], r.name, r.qualifier, fid, r.line, r.col) for r in res.refs])
+        c.executemany("INSERT INTO refs(kind, src_id, name, qualifier, file_id, line, col, detail) "
+                      "VALUES(?,?,?,?,?,?,?,?)",
+                      [(r.kind, ids[r.src], r.name, r.qualifier, fid, r.line, r.col, r.detail) for r in res.refs])
         mrows = []
         for lid, ms in res.metrics.items():
             for k, v in ms.items():
@@ -329,7 +354,8 @@ class Database:
         """Best entity referenced or declared at a source position (1-based)."""
         best = None
         rows = self.conn.execute("SELECT dst_id, col, length(name) FROM refs WHERE file_id=? AND line=? "
-                                 "AND dst_id IS NOT NULL", (file_id, line)).fetchall()
+                                 "AND dst_id IS NOT NULL AND detail NOT LIKE ?",
+                                 (file_id, line, M.ALIAS_LIKE)).fetchall()
         for dst, c, ln in rows:
             if col is None or (c <= col <= c + max(ln, 1)):
                 best = dst
@@ -355,17 +381,20 @@ class Database:
         return [Ref(*r) for r in self.conn.execute(sql, args)]
 
     def refs_from(self, eid, kinds=None, resolved=True) -> list[Ref]:
-        sql = "SELECT id, kind, src_id, dst_id, name, qualifier, file_id, line, col FROM refs WHERE src_id=?"
+        sql = f"SELECT {REF_COLS} FROM refs WHERE src_id=?"
         args = [eid]
         if resolved:
             sql += " AND dst_id IS NOT NULL"
         if kinds:
             sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
             args += list(kinds)
+        else:
+            sql += " AND kind NOT IN (%s)" % ",".join("?" * len(M.LINKER_REF_KINDS))
+            args += list(M.LINKER_REF_KINDS)
         return self._refs(sql + " ORDER BY line, col", args)
 
     def refs_to(self, eid, kinds=None) -> list[Ref]:
-        sql = "SELECT id, kind, src_id, dst_id, name, qualifier, file_id, line, col FROM refs WHERE dst_id=?"
+        sql = f"SELECT {REF_COLS} FROM refs WHERE dst_id=?"
         args = [eid]
         if kinds:
             sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
@@ -373,7 +402,7 @@ class Database:
         return self._refs(sql + " ORDER BY file_id, line, col", args)
 
     def refs_in_file(self, file_id) -> list[Ref]:
-        return self._refs("SELECT id, kind, src_id, dst_id, name, qualifier, file_id, line, col FROM refs "
+        return self._refs(f"SELECT {REF_COLS} FROM refs "
                           "WHERE file_id=? AND dst_id IS NOT NULL ORDER BY line, col", (file_id,))
 
     def related(self, eid, kinds, reverse=False) -> list[Entity]:

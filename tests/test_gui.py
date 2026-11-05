@@ -103,6 +103,24 @@ def test_main_window_workflow(app, tmp_path, monkeypatch):
     w = next(f for f in win.db.children(rect.id) if f.name == "w_")
     win.open_modify_tree(w)
     assert win.tabs.currentWidget().member.currentData() == w.id
+    win.open_field_tree(w)
+    field = win.tabs.currentWidget()
+    assert field.mode == "field" and field.title == "Field Tree: Rect.w_"
+    assert field.tree.lifecycle and field.tree.down[0].rel == "declare"
+    assert field.creates.isVisibleTo(field) and field.member.isHidden() and field.down.isHidden()
+    with_creations = field.tree.size
+    field.creates.setChecked(False)
+    assert field.tree.creations == 0 and field.tree.size <= with_creations
+    field.creates.setChecked(True)
+    field.paths.setChecked(False)
+    field.grab()
+    field.picker.setText("Rect.w_")
+    field._picked("no.such.field")
+    assert "No field" in field.info.text()
+    field._picked("Rect.w_")
+    assert field.entity.id == w.id
+    win.a_fieldtree.trigger()
+    assert win.tabs.currentWidget().mode == "field"
     win.open_graph("architecture", None)
     panel = win.tabs.currentWidget()
     some = next(iter(panel.canvas.node_items))

@@ -65,6 +65,7 @@ class Linker:
                   % ",".join("?" * len(unresolved)), unresolved)
         c.execute("DELETE FROM entities WHERE kind IN (%s)" % ",".join("?" * len(unresolved)), unresolved)
         c.execute("UPDATE entities SET parent_id=parent0, alias_of=NULL")
+        c.execute("DELETE FROM refs WHERE detail LIKE ?", (M.VIA_PREFIX + "%",))    # made by the last link
         c.execute("UPDATE refs SET dst_id=NULL")
         self.progress("Linking", 0, 1, "Loading entities")
         self.E = {}
@@ -112,6 +113,8 @@ class Linker:
                 self.result[r[0]] = t
                 if r[1] == M.CALL and self.E[t].kind in M.CLASS_KINDS:
                     self.new_kind[r[0]] = M.CREATE
+        self.progress("Linking", 0, 1, "Resolving writes through calls")
+        self._resolve_writes()
         self._create_unresolved(refs)
         self._write()
 
@@ -628,6 +631,66 @@ class Linker:
             return t
         return self.global_lookup(name, kinds, src, fid)
 
+    # ---- writes through calls -----------------------------------------------------------------
+    def _overloads(self, src, name, qual, fid, nargs):
+        """Functions a call may reach: same-named functions that take *nargs* arguments.
+
+        The overload is not chosen by argument type, so a const and a non-const overload both count.
+        """
+        t = self._resolve((0, M.CALL, src, name, qual, fid), M.FUNCTION_KINDS)
+        if t is None:
+            return []
+        group = [i for i in self.children.get(self.E[t].parent, {}).get(name, ()) if self.E[i].kind in M.FUNCTION_KINDS]
+        return [i for i in group if _param_count(self.E[i].signature) == nargs] or [t]
+
+    def _resolve_writes(self):
+        """Add the writes that need knowledge of the called function.
+
+        ``convert(a, j.damping)`` writes j.damping if that parameter is a non-const reference, and
+        ``get(j) = 1`` writes what get returns if get returns a non-const reference.  Each write
+        becomes a Set in the calling function, with the callee's name in its detail.
+        """
+        rows = self.c.execute("SELECT kind, src_id, name, qualifier, file_id, line, col, detail FROM refs "
+                              "WHERE kind IN (%s) ORDER BY id" % ",".join("?" * len(M.LINKER_REF_KINDS)),
+                              M.LINKER_REF_KINDS).fetchall()
+        rows = [r for r in rows if r[1] in self.E]
+        kinds = M.TARGETS[M.SET]
+        exposed = defaultdict(list)
+        for kind, src, name, qual, fid, _, _, _ in rows:
+            if kind == M.EXPOSE:
+                t = self._resolve((0, M.SET, src, name, qual, fid), kinds)
+                if t is not None and self.E[t].kind not in M.LOCAL_KINDS and t not in exposed[src]:
+                    exposed[src].append(t)
+        self.via_writes = []
+        seen, reached = set(), {}
+
+        def callees(src, name, qual, fid, nargs):
+            key = (src, name, qual, nargs)
+            if key not in reached:
+                reached[key] = self._overloads(src, name, qual, fid, nargs)
+            return reached[key]
+
+        def add(src, target, fid, line, col, via, local):
+            key = (src, target, line, via)
+            if key not in seen:
+                seen.add(key)
+                self.via_writes.append((M.SET, src, target, self.E[target].name, "", fid, line, col,
+                                        M.VIA_PREFIX + via + (f"\t{M.ALIAS_PREFIX}{local}" if local else "")))
+
+        for kind, src, name, qual, fid, line, col, detail in rows:
+            if kind == M.OUT_ARG:
+                index, nargs, mode, local, callee, callee_qual = detail.split("\t", 5)
+                if any(f"{mode}{index}" in M.out_params(self.E[f].modifiers)
+                       for f in callees(src, callee, callee_qual, fid, int(nargs))):
+                    t = self._resolve((0, M.SET, src, name, qual, fid), kinds)
+                    if t is not None:
+                        add(src, t, fid, line, col, callee, local)
+            elif kind == M.WRITE_CALL:
+                nargs, local = detail.split("\t", 1)
+                for f in callees(src, name, qual, fid, int(nargs)):
+                    for t in exposed.get(f, ()):
+                        add(src, t, fid, line, col, name, local)
+
     # ---- unresolved placeholders and persistence -------------------------------------------------------
     def _create_unresolved(self, refs):
         placeholders = {}
@@ -681,6 +744,8 @@ class Linker:
             dst = self.canonical(dst) if dst in self.E else dst
             upd.append((dst, self.new_kind.get(rid), rid))
         c.executemany("UPDATE refs SET dst_id=?, kind=COALESCE(?, kind) WHERE id=?", upd)
+        c.executemany("INSERT INTO refs(kind, src_id, dst_id, name, qualifier, file_id, line, col, detail) "
+                      "VALUES(?,?,?,?,?,?,?,?,?)", self.via_writes)
         c.commit()
         self.db.invalidate()
 

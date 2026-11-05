@@ -33,6 +33,25 @@ DECL_WRAPPERS = frozenset({
     "pointer_declarator", "reference_declarator", "parenthesized_declarator",
     "attributed_declarator", "init_declarator", "array_declarator",
 })
+# functions that create an object of their template argument
+FACTORIES = frozenset({"make_unique", "make_shared", "make_optional", "allocate_shared"})
+# nodes that end the scope of a local variable
+SCOPE_NODES = frozenset({"compound_statement", "for_statement", "for_range_loop", "if_statement", "while_statement",
+                         "switch_statement", "catch_clause", "translation_unit"})
+_LEADING_NAME = re.compile(r"[A-Za-z_]\w*")
+
+
+class _Alias:
+    """A local reference or pointer to other data: writing through it writes that data."""
+    __slots__ = ("targets", "quals", "pointer", "auto", "start", "end")
+
+    def __init__(self, pointer, auto, start, end):
+        self.targets = []           # expression nodes it refers to; empty: a plain local that hides an outer alias
+        self.quals = []             # the same expressions as text, for names written through an auto alias
+        self.pointer = pointer
+        self.auto = auto            # declared with auto: only the expression tells its type
+        self.start = start
+        self.end = end
 
 
 class CExtractor(BaseExtractor):
@@ -56,6 +75,9 @@ class CExtractor(BaseExtractor):
         self.access = {}            # class lid -> current access specifier
         self.template_names = []    # stack of sets of template parameter names
         self.typedef_hint = None
+        self.ref_returns = set()    # functions that return a non-const reference
+        self.lambdas = {}           # (function lid, local name) -> writable parameters of a lambda
+        self.aliases = {}           # (function lid, local name) -> [_Alias], newest last
 
     # ---- helpers -------------------------------------------------------------
     def compact(self, node) -> str:
@@ -145,6 +167,189 @@ class CExtractor(BaseExtractor):
                 continue        # definitions are handled by their own handler
             else:
                 stack.extend(n.named_children)
+
+    def _is_const(self, node):
+        """True if *node* (a parameter or function) has a 'const' on its base type."""
+        return any(c.type == "type_qualifier" and self.text(c) == "const" for c in node.children)
+
+    def _writable_params(self, params):
+        """Parameters through which a function can change the caller's object: ['r3', 'p5'].
+
+        r: non-const lvalue reference.  p: pointer to non-const.  T&& is left out: it binds to
+        temporaries and moved objects, and template forwarding references cannot be told apart.
+        """
+        out = []
+        if params is None:
+            return out
+        items = [p for p in params.named_children if p.type != "comment"]
+        for i, p in enumerate(items):
+            if p.type not in ("parameter_declaration", "optional_parameter_declaration") or self._is_const(p):
+                continue
+            d = p.child_by_field_name("declarator")
+            while d is not None and d.type in ("parenthesized_declarator", "attributed_declarator"):
+                d = d.named_children[0] if d.named_children else None
+            if d is None:
+                continue
+            if d.type in ("reference_declarator", "abstract_reference_declarator"):
+                if not any(c.type == "&&" for c in d.children):
+                    out.append(f"r{i}")
+            elif d.type in ("pointer_declarator", "abstract_pointer_declarator"):
+                out.append(f"p{i}")
+        return out
+
+    def _type_parts(self, typ):
+        """(name, qualifier) of a class-like type node, or None for auto, int, template parameters, ..."""
+        if typ is None:
+            return None
+        t = typ.type
+        if t == "type_identifier":
+            name, q = self.text(typ), ""
+        elif t == "template_type":
+            name, q = self.text(typ.child_by_field_name("name")), ""
+        elif t == "qualified_identifier":
+            q, _, name = strip_templates(self.compact(typ)).replace(" ", "").rpartition("::")
+        else:
+            return None
+        if not name or name in BUILTIN_TYPES or self._is_template_name(name):
+            return None
+        return name, q
+
+    def _object_ref(self, typ, node, var=""):
+        """Record that an object of type *typ* is created at *node*."""
+        parts = self._type_parts(typ)
+        if parts is not None:
+            self.ref(M.OBJECT, parts[0], node, parts[1], detail=var)
+
+    # ---- local aliases -------------------------------------------------------------
+    def _is_lvalue_ref(self, decl, auto):
+        """True for 'T& x' and 'auto&& x'.  'T&& x' binds to temporaries, so it refers to no named data."""
+        return decl is not None and decl.type == "reference_declarator" \
+            and (auto or not any(c.type == "&&" for c in decl.children))
+
+    def _alias_targets(self, value, pointer):
+        """Expressions a new reference or pointer refers to; a?b:c gives both, a pointer copy what it points at."""
+        if value is None:
+            return []
+        t = value.type
+        if t in ("parenthesized_expression", "initializer_list", "argument_list"):
+            items = [c for c in value.named_children if c.type != "comment"]
+            return self._alias_targets(items[0], pointer) if len(items) == 1 else []
+        if t == "conditional_expression":
+            return self._alias_targets(value.child_by_field_name("consequence"), pointer) + \
+                self._alias_targets(value.child_by_field_name("alternative"), pointer)
+        if pointer:
+            if t == "pointer_expression" and self.text(value.child_by_field_name("operator")) == "&":
+                return [value.child_by_field_name("argument")]
+            if t == "identifier":
+                a = self._alias_of(self.text(value), value.start_byte)
+                return list(a.targets) if a is not None and a.pointer else []
+            return []
+        return [value] if t in ("identifier", "field_expression", "subscript_expression", "call_expression",
+                                "pointer_expression") else []
+
+    def _add_alias_targets(self, alias, targets, suffix=""):
+        for target in targets:
+            alias.targets.append(target)
+            alias.quals += [q + suffix for q in self._quals(self.compact(target), target.start_byte)]
+
+    def _note_local(self, node, decl, typ, name_node, value):
+        """Remember a local declared by *decl*: an alias, or a plain local that hides an outer alias."""
+        key = (self.cur, self.text(name_node))
+        auto = typ is not None and typ.type == "placeholder_type_specifier"
+        d = decl.child_by_field_name("declarator") if decl.type == "init_declarator" else decl
+        pointer = d is not None and d.type == "pointer_declarator"
+        writable = not self._is_const(node) and (pointer or self._is_lvalue_ref(d, auto))
+        if not writable and key not in self.aliases:
+            return
+        scope = node.parent
+        while scope is not None and scope.type not in SCOPE_NODES:
+            scope = scope.parent
+        alias = _Alias(pointer and writable, auto, node.start_byte, scope.end_byte if scope is not None else node.end_byte)
+        if writable:
+            self._add_alias_targets(alias, self._alias_targets(value, pointer))
+        self.aliases.setdefault(key, []).append(alias)
+
+    def _alias_entry(self, name, at):
+        for a in reversed(self.aliases.get((self.cur, name), ())):
+            if a.start <= at < a.end:
+                return a
+        return None
+
+    def _alias_of(self, name, at):
+        """The alias called *name* at byte *at*, if it refers to something."""
+        a = self._alias_entry(name, at)
+        return a if a is not None and a.targets else None
+
+    def _quals(self, text, at):
+        """Qualifiers for a name written through *text*: an auto alias at its start becomes what it refers to.
+
+        After ``auto& j = b.items[0];`` the write ``j.mass = 1`` has qualifier ``b.items[0]``: the
+        declared type of j says nothing, but the expression leads to the member.
+        """
+        m = _LEADING_NAME.match(text)
+        if m is not None and not text.startswith("::", m.end()):
+            a = self._alias_of(m.group(), at)
+            if a is not None and a.auto:
+                return [q + text[m.end():] for q in a.quals]
+        return [text]
+
+    def _alias_root(self, left):
+        """(alias, its name node, how) if writing to *left* writes through a local alias, else None.
+
+        how is "" when the data itself is written, "part" when a member or an element of it is.
+        Writing a pointer variable itself (p = &x) moves the pointer and writes nothing else.
+        """
+        steps = 0
+        while left is not None:
+            t = left.type
+            if t == "parenthesized_expression":
+                left = left.named_children[0] if left.named_children else None
+                continue
+            arrow = t == "field_expression" and self.text(left.child_by_field_name("operator")) == "->"
+            deref = t == "pointer_expression" and self.text(left.child_by_field_name("operator")) == "*"
+            if arrow or deref or t == "subscript_expression":
+                arg = left.child_by_field_name("argument")
+                if arg is not None and arg.type == "identifier":
+                    a = self._alias_of(self.text(arg), arg.start_byte)
+                    if a is not None and a.pointer:
+                        return a, arg, "" if deref and not steps else "part"
+                if arrow or deref:
+                    return None           # another pointer: the target of the alias does not change
+                steps, left = steps + 1, arg
+            elif t == "field_expression":
+                steps, left = steps + 1, left.child_by_field_name("argument")
+            elif t == "identifier":
+                a = self._alias_of(self.text(left), left.start_byte)
+                return None if a is None or a.pointer else (a, left, "part" if steps else "")
+            else:
+                return None
+        return None
+
+    def _alias_names(self, alias, seen=None):
+        """(name, qualifier) of each name reached through *alias*; a call in it gives (None, call node)."""
+        seen = seen if seen is not None else set()
+        if id(alias) in seen:
+            return
+        seen.add(id(alias))
+        for target in alias.targets:
+            for name, obj in self._write_chain(target):
+                if name is None:
+                    yield None, obj
+                    continue
+                for q in self._quals(self.compact(obj) if obj is not None else "", name.start_byte):
+                    yield self.text(name), q
+            inner = self._alias_root(target)
+            if inner is not None:
+                yield from self._alias_names(inner[0], seen)
+
+    def _write_call_ref(self, call, at, local=""):
+        """f(x) = value, or an alias of f(x) written at *at*: writes what the returned reference refers to."""
+        callee = self._callee(call.child_by_field_name("function"))
+        args = call.child_by_field_name("arguments")
+        if callee is not None and args is not None:
+            count = sum(1 for a in args.named_children if a.type != "comment")
+            for q in self._quals(callee[1], call.start_byte):
+                self.ref(M.WRITE_CALL, callee[0], at, q, detail=f"{count}\t{local}")
 
     def _mods(self, node):
         mods = []
@@ -377,6 +582,10 @@ class CExtractor(BaseExtractor):
             mods.append("destructor")
         if self.template_names:
             mods.append("template")
+        params = decl.child_by_field_name("parameters")
+        token = M.out_token(self._writable_params(params))
+        if token:
+            mods.append(token)
         rtype = node.child_by_field_name("type")
         owner_ln = owner
         prefix = self.scope_longname(self.cur)
@@ -386,11 +595,14 @@ class CExtractor(BaseExtractor):
                               signature=sig[:300], modifiers=" ".join(mods),
                               type=simple_type(self.text(rtype)) if rtype is not None else "",
                               owner=owner_ln)
+        outer = node.child_by_field_name("declarator")
+        if outer.type == "reference_declarator" and not self._is_const(node) \
+                and not any(c.type == "&&" for c in outer.children):
+            self.ref_returns.add(lid)
         if rtype is not None:
             self.type_ref(rtype, src=lid)
         done = self.enter_function(lid)
         extra = []
-        params = decl.child_by_field_name("parameters")
         if params is not None:
             for p in params.named_children:
                 self._param(p, extra)
@@ -432,6 +644,15 @@ class CExtractor(BaseExtractor):
         return None
 
     # ---- declarations ------------------------------------------------------------
+    def _holds_object(self, decl):
+        """False for declarators of pointers and references: those do not create an object."""
+        while decl is not None and decl.type in DECL_WRAPPERS:
+            if decl.type in ("pointer_declarator", "reference_declarator"):
+                return False
+            decl = decl.child_by_field_name("declarator") or \
+                next((c for c in decl.named_children if c.type not in ("type_qualifier", "attribute_specifier")), None)
+        return True
+
     def on_declaration(self, node):
         typ = node.child_by_field_name("type")
         sk = self._scope_kind()
@@ -455,6 +676,10 @@ class CExtractor(BaseExtractor):
                     visit.append(v)
                     if v.type == "argument_list" and typ is not None and in_func:
                         self.ref(M.CREATE, tname, typ)
+                    if v.type == "lambda_expression" and inner.type == "identifier":
+                        lam = v.child_by_field_name("declarator")
+                        params = lam.child_by_field_name("parameters") if lam is not None else None
+                        self.lambdas[(self.cur, self.text(inner))] = frozenset(self._writable_params(params))
             if inner.type == "function_declarator":
                 if in_func:
                     continue
@@ -466,9 +691,12 @@ class CExtractor(BaseExtractor):
                 fm = list(mods) + ["decl"]
                 if name.startswith("~"):
                     fm.append("destructor")
+                params = inner.child_by_field_name("parameters")
+                token = M.out_token(self._writable_params(params))
+                if token:
+                    fm.append(token)
                 self.add_entity(kind, name, node, name_node, longname=self._longname(name, owner),
                                 signature=sig[:300], modifiers=" ".join(fm), type=tname, owner=owner)
-                params = inner.child_by_field_name("parameters")
                 if params is not None:
                     for p in params.named_children:
                         self.type_ref(p.child_by_field_name("type"))
@@ -480,6 +708,10 @@ class CExtractor(BaseExtractor):
                 self.add_entity(kind, self.text(inner), d, inner, type=tname,
                                 signature=(self.compact(typ) + " " + self.compact(d))[:200] if typ is not None else "",
                                 modifiers=" ".join(vm))
+                if "extern" not in vm and self._holds_object(d):
+                    self._object_ref(typ, inner, self.text(inner))
+                if in_func:
+                    self._note_local(node, d, typ, inner, init.child_by_field_name("value") if init is not None else None)
             elif inner.type == "qualified_identifier":
                 self._consume_tree(inner)
         return Visit(visit)
@@ -516,8 +748,11 @@ class CExtractor(BaseExtractor):
                     for p in params.named_children:
                         self.type_ref(p.child_by_field_name("type"))
             elif inner.type in ("field_identifier", "identifier"):
+                init = ""                 # default value: 'int x = 3', 'ScalarT x{0}'
+                if dv is not None:
+                    init = self.compact(dv) if dv.type == "initializer_list" else " = " + self.compact(dv)
                 lid = self.add_entity(M.FIELD, self.text(inner), d, inner, type=tname, modifiers=" ".join(mods),
-                                      signature=(self.compact(typ) + " " + self.compact(d))[:200]
+                                      signature=(self.compact(typ) + " " + self.compact(d) + init)[:200]
                                       if typ is not None else "")
                 if plain_type is not None:
                     # the field itself references its type: enables composition (has-a) analysis
@@ -536,6 +771,17 @@ class CExtractor(BaseExtractor):
         self.type_ref(t)
         if d is not None and d.type == "identifier":
             self.add_entity(M.LOCAL, self.text(d), node, d, type=simple_type(self.text(t)) if t is not None else "")
+            right = node.child_by_field_name("right")
+            auto = t is not None and t.type == "placeholder_type_specifier"
+            key = (self.cur, self.text(d))
+            if not self._is_const(node) and self._is_lvalue_ref(node.child_by_field_name("declarator"), auto) \
+                    and right is not None:
+                # for (auto& x : b.items): x is an element of b.items
+                alias = _Alias(False, auto, node.start_byte, node.end_byte)
+                self._add_alias_targets(alias, [right], "[]")
+                self.aliases.setdefault(key, []).append(alias)
+            elif key in self.aliases:
+                self.aliases[key].append(_Alias(False, auto, node.start_byte, node.end_byte))
         return Visit([c for c in (node.child_by_field_name("right"), node.child_by_field_name("body")) if c is not None])
 
     # ---- expressions ----------------------------------------------------------------
@@ -554,7 +800,7 @@ class CExtractor(BaseExtractor):
                 if f.type == "template_method":
                     name = self.text(f.child_by_field_name("name"))
                 if name in MUTATORS:            # links.push_back(x) modifies links
-                    self._mark_set(arg)
+                    self._mark_set(arg, call=name, arrow=self.text(fn.child_by_field_name("operator")) == "->")
                 self.ref(M.CALL, name, f, self.compact(arg))
                 self._consume_tree(f)
         elif fn.type == "qualified_identifier":
@@ -566,6 +812,91 @@ class CExtractor(BaseExtractor):
             n = fn.child_by_field_name("name")
             self.ref(M.CALL, self.text(n), n)
             self.consumed.add(n.start_byte)
+        callee = self._callee(fn)
+        if callee is not None:
+            self._note_arguments(node, *callee)
+            if callee[0] in FACTORIES:
+                self._factory_object(fn)
+        return None
+
+    def _callee(self, fn):
+        """(name, qualifier) of the function expression of a call, or None."""
+        if fn.type == "identifier":
+            return self.text(fn), ""
+        if fn.type == "field_expression":
+            f = fn.child_by_field_name("field")
+            if f is None:
+                return None
+            name = self.text(f.child_by_field_name("name") if f.type == "template_method" else f)
+            return name, self.compact(fn.child_by_field_name("argument"))
+        if fn.type == "qualified_identifier":
+            q, _, name = strip_templates(self.compact(fn)).replace(" ", "").rpartition("::")
+            return name, q
+        if fn.type == "template_function":
+            return self.text(fn.child_by_field_name("name")), ""
+        return None
+
+    def _note_arguments(self, node, callee, qual):
+        """Record the names passed to a call: the callee may change them through its parameters."""
+        args = node.child_by_field_name("arguments")
+        if args is None:
+            return
+        items = [a for a in args.named_children if a.type != "comment"]
+        writable = self.lambdas.get((self.cur, callee)) if not qual else None
+        for i, a in enumerate(items):
+            mode, found = "r", None
+            if a.type == "pointer_expression" and self.text(a.child_by_field_name("operator")) == "&":
+                a, mode = a.child_by_field_name("argument"), "p"
+            elif a.type == "identifier":
+                pointer = self._alias_of(self.text(a), a.start_byte)
+                if pointer is not None and pointer.pointer:   # f(p) gives f the address p holds
+                    mode, found = "p", (pointer, a, "part")
+            if writable is not None:          # local lambda: its parameters are known right here
+                if f"{mode}{i}" in writable and found is None:
+                    self._mark_set(a)
+                elif f"{mode}{i}" in writable:
+                    self._write_through(found)
+                continue
+            for name, obj in self._write_chain(a):
+                if name is not None:
+                    for q in self._quals(self.compact(obj) if obj is not None else "", name.start_byte):
+                        self.ref(M.OUT_ARG, self.text(name), name, q,
+                                 detail=f"{i}\t{len(items)}\t{mode}\t\t{callee}\t{qual}")
+            found = found or self._alias_root(a)
+            if found is not None:
+                local = self.text(found[1])
+                for name, q in self._alias_names(found[0]):
+                    if name is not None:
+                        self.ref(M.OUT_ARG, name, a, q, detail=f"{i}\t{len(items)}\t{mode}\t{local}\t{callee}\t{qual}")
+
+    def _factory_object(self, fn):
+        """make_unique<Foo>(...): the first template argument is the created type."""
+        stack = [fn]
+        while stack:
+            n = stack.pop()
+            if n.type == "template_argument_list":
+                td = next((c for c in n.named_children if c.type == "type_descriptor"), None)
+                if td is not None:
+                    self._object_ref(td.child_by_field_name("type"), fn)
+                return
+            stack.extend(n.named_children)
+
+    def on_compound_literal_expression(self, node):
+        self._object_ref(node.child_by_field_name("type"), node)
+        return None
+
+    def on_return_statement(self, node):
+        if self.cur in self.ref_returns:
+            expr = next((c for c in node.named_children if c.type != "comment"), None)
+            for name, obj in self._write_chain(expr):
+                if name is not None:
+                    for q in self._quals(self.compact(obj) if obj is not None else "", name.start_byte):
+                        self.ref(M.EXPOSE, self.text(name), name, q)
+            found = self._alias_root(expr)
+            if found is not None:
+                for name, q in self._alias_names(found[0]):
+                    if name is not None:
+                        self.ref(M.EXPOSE, name, expr, q)
         return None
 
     def on_new_expression(self, node):
@@ -584,7 +915,9 @@ class CExtractor(BaseExtractor):
             return None
         arg = node.child_by_field_name("argument")
         kind = M.SET if f.start_byte in self.set_nodes else M.USE
-        self.ref(kind, self.text(f), f, self.compact(arg))
+        text = self.compact(arg)
+        for q in self._quals(text, f.start_byte) if kind == M.SET else [text]:
+            self.ref(kind, self.text(f), f, q)
         self.consumed.add(f.start_byte)
         return None
 
@@ -601,34 +934,72 @@ class CExtractor(BaseExtractor):
         self._consume_tree(node)
         return SKIP
 
-    def _mark_set(self, left):
-        """Mark the names written by an assignment target.
+    def _write_chain(self, left):
+        """Yield (name node, object expression) for each name modified by writing to *left*.
 
         In ``a.b[i].c = x`` the object ``a`` and its members ``b`` and ``c`` are all modified;
         the walk stops at ``->`` because writing through a pointer does not modify the pointer.
+        A chain that starts at a call, as in ``f(x).c = y``, ends with (None, call node).
         """
         while left is not None:
             t = left.type
             if t == "identifier":
-                self.set_nodes.add(left.start_byte)
+                yield left, None
                 return
             if t == "field_expression":
                 f = left.child_by_field_name("field")
+                arg = left.child_by_field_name("argument")
                 if f is not None:
-                    self.set_nodes.add(f.start_byte)
+                    yield f, arg
                 op = left.child_by_field_name("operator")
                 if op is not None and self.text(op) == "->":
                     return
-                left = left.child_by_field_name("argument")
+                left = arg
             elif t == "subscript_expression":
                 left = left.child_by_field_name("argument")
             elif t == "parenthesized_expression":
                 left = left.named_children[0] if left.named_children else None
             else:
+                if t == "call_expression":
+                    yield None, left
                 return
 
+    def _mark_set(self, left, call="", arrow=False):
+        """Mark the names written by an assignment target, or by the mutating member function *call*.
+
+        *arrow*: the call is made through ``->``, so it changes what the pointer *left* points at.
+        """
+        for name, obj in self._write_chain(left):
+            if name is not None:
+                self.set_nodes.add(name.start_byte)
+            else:
+                self._write_call_ref(obj, obj)
+        found = self._alias_root(left)
+        if arrow and left is not None and left.type == "identifier":
+            a = self._alias_of(self.text(left), left.start_byte)
+            found = (a, left, "") if a is not None and a.pointer else None
+        if found is not None:
+            alias, local, how = found
+            self._write_through((alias, local, how or call))
+
+    def _write_through(self, found):
+        """Record the writes made through an alias, at the position of the alias."""
+        alias, local, how = found
+        name_text = self.text(local)
+        for name, q in self._alias_names(alias):
+            if name is None:
+                self._write_call_ref(q, local, name_text)
+            else:
+                self.ref(M.SET, name, local, q, detail=f"{M.ALIAS_PREFIX}{name_text}\t{how}")
+
     def on_assignment_expression(self, node):
-        self._mark_set(node.child_by_field_name("left"))
+        left = node.child_by_field_name("left")
+        self._mark_set(left)
+        if left is not None and left.type == "identifier":
+            # p = &x: p may point at x from here on.  Older targets stay: a branch may not have run.
+            a = self._alias_entry(self.text(left), left.start_byte)
+            if a is not None and a.pointer:
+                self._add_alias_targets(a, self._alias_targets(node.child_by_field_name("right"), True))
 
     def on_update_expression(self, node):
         self._mark_set(node.child_by_field_name("argument"))

@@ -131,17 +131,17 @@ class BaseExtractor:
     def top_prefix(self, name):
         return name
 
-    def ref(self, kind, name, node, qualifier="", src=None):
+    def ref(self, kind, name, node, qualifier="", src=None, detail=""):
         if not name:
             return
         if src is None:
             src = self.cur
         line = node.start_point[0] + 1
-        key = (kind, src, name, qualifier, line)
+        key = (kind, src, name, qualifier, line, detail)
         if key in self._ref_keys:
             return
         self._ref_keys.add(key)
-        self.refs.append(XRef(kind, src, name, qualifier, line, node.start_point[1] + 1))
+        self.refs.append(XRef(kind, src, name, qualifier, line, node.start_point[1] + 1, detail))
 
     def push_scope(self, lid):
         self.scope.append(lid)

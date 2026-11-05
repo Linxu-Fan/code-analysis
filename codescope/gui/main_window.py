@@ -307,6 +307,9 @@ class MainWindow(QMainWindow):
         self.a_modtree = self._act("&Modification Tree\u2026", lambda: self.open_modify_tree(self._current_modify_target()),
                                    "Ctrl+Shift+M", tip="Where and in which order a struct or one of its members "
                                    "is modified", icon="modify")
+        self.a_fieldtree = self._act("&Field Tree\u2026", lambda: self.open_field_tree(self._current_field()),
+                                     "Ctrl+Shift+L", tip="Where one field is declared, created and modified, in order",
+                                     icon="modify")
         self.a_codecheck = self._act("&CodeCheck\u2026", self.open_codecheck, "Ctrl+Shift+K", icon="check")
         self.a_report = self._act("&HTML Report\u2026", self.html_report, icon="report")
         self.a_dark = self._act("&Dark Theme", self.toggle_theme, icon="theme")
@@ -395,7 +398,7 @@ class MainWindow(QMainWindow):
         self.graph_btn.setMenu(gm)
         self._themed.append((self.graph_btn, "graph"))
         tb.addWidget(self.graph_btn)
-        for a in (self.a_calltree, self.a_classtree, self.a_modtree, self.a_arch, self.a_uml, None, self.a_metrics, self.a_treemap, self.a_dsm, None,
+        for a in (self.a_calltree, self.a_classtree, self.a_modtree, self.a_fieldtree, self.a_arch, self.a_uml, None, self.a_metrics, self.a_treemap, self.a_dsm, None,
                   self.a_codecheck, self.a_report):
             tb.addSeparator() if a is None else tb.addAction(a)
         spacer = QWidget()
@@ -438,7 +441,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_close, self.a_config, self.a_analyze, self.a_full, self.a_overview, self.a_find,
                   self.a_metrics, self.a_treemap, self.a_dsm, self.a_export_metrics, self.a_arch, self.a_uml,
                   self.a_codecheck, self.a_report, self.a_find_entity, self.a_calltree, self.a_classtree,
-                  self.a_modtree):
+                  self.a_modtree, self.a_fieldtree):
             a.setEnabled(has and not (busy and a in (self.a_analyze, self.a_full, self.a_config)))
         self.graph_btn.setEnabled(has)
         self.quick.setEnabled(has)
@@ -820,9 +823,9 @@ class MainWindow(QMainWindow):
         """(line, col, name, kind) for every resolved reference and declaration in a file."""
         rows = self.db.conn.execute(
             "SELECT r.line, r.col, r.name, e.kind FROM refs r JOIN entities e ON e.id = r.dst_id "
-            "WHERE r.file_id=? AND r.kind NOT IN ('Include', 'Import') "
+            "WHERE r.file_id=? AND r.kind NOT IN ('Include', 'Import') AND r.detail NOT LIKE ? "
             "UNION ALL SELECT line, col, name, kind FROM entities WHERE file_id=? AND kind != 'File'",
-            (file_id, file_id)).fetchall()
+            (file_id, M.ALIAS_LIKE, file_id)).fetchall()
         return rows
 
     def _type_names(self, refresh=False):
@@ -1029,6 +1032,8 @@ class MainWindow(QMainWindow):
             m.addAction(theme.icon("architecture"), "Class Tree\u2026", lambda: self.open_class_tree(e))
         if e.kind in M.CLASS_KINDS or e.kind in (M.FIELD, M.PROPERTY):
             m.addAction(theme.icon("modify"), "Modification Tree\u2026", lambda: self.open_modify_tree(e))
+        if e.kind in (M.FIELD, M.PROPERTY):
+            m.addAction(theme.icon("modify"), "Field Tree\u2026", lambda: self.open_field_tree(e))
         g = m.addMenu(theme.icon("graph"), "Graphs")
         for kind in graphs_for(e):
             g.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
@@ -1061,12 +1066,16 @@ class MainWindow(QMainWindow):
             return e
         return self._current_class()
 
+    def _current_field(self):
+        e = self.db.entity(self.current_entity) if (self.db and self.current_entity) else None
+        return e if e is not None and e.kind in (M.FIELD, M.PROPERTY) else None
+
     def open_call_tree(self, entity=None, mode="call", member=None):
         from .calltree_view import CallTreePanel
         if self.db is None:
             return
         panel = CallTreePanel(self.db, entity, mode=mode, member=member)
-        icon = {"call": "calls", "class": "architecture", "modify": "modify"}[mode]
+        icon = {"call": "calls", "class": "architecture", "modify": "modify", "field": "modify"}[mode]
         self.add_tab(panel, panel.title, connect=True, icon=icon)
         if entity is None:
             panel.picker.setFocus()
@@ -1081,6 +1090,10 @@ class MainWindow(QMainWindow):
             member, entity = entity, self.db.enclosing(entity, M.CLASS_KINDS)
         self.open_call_tree(entity, mode="modify", member=member)
 
+    def open_field_tree(self, entity=None):
+        """Declaration, creation and modification of one field, as a tree."""
+        self.open_call_tree(entity, mode="field")
+
     def _info_graph_menu(self):
         if not self.current_entity:
             return
@@ -1092,6 +1105,8 @@ class MainWindow(QMainWindow):
             m.addAction(theme.icon("architecture"), "Class Tree\u2026", lambda: self.open_class_tree(e))
         if e.kind in M.CLASS_KINDS or e.kind in (M.FIELD, M.PROPERTY):
             m.addAction(theme.icon("modify"), "Modification Tree\u2026", lambda: self.open_modify_tree(e))
+        if e.kind in (M.FIELD, M.PROPERTY):
+            m.addAction(theme.icon("modify"), "Field Tree\u2026", lambda: self.open_field_tree(e))
         for kind in graphs_for(e):
             m.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
                         lambda k=kind: self.open_graph(k, e.id))
@@ -1112,6 +1127,8 @@ class MainWindow(QMainWindow):
                 m.addAction(theme.icon("architecture"), "Class Tree\u2026", lambda: self.open_class_tree(e))
             if e.kind in M.CLASS_KINDS or e.kind in (M.FIELD, M.PROPERTY):
                 m.addAction(theme.icon("modify"), "Modification Tree\u2026", lambda: self.open_modify_tree(e))
+            if e.kind in (M.FIELD, M.PROPERTY):
+                m.addAction(theme.icon("modify"), "Field Tree\u2026", lambda: self.open_field_tree(e))
             for kind in graphs_for(e):
                 m.addAction(theme.icon(self.GRAPH_ICONS.get(kind, "graph")), GRAPH_TYPES[kind],
                             lambda k=kind: self.open_graph(k, e.id))
@@ -1122,6 +1139,7 @@ class MainWindow(QMainWindow):
         m.addAction(self.a_calltree)
         m.addAction(self.a_classtree)
         m.addAction(self.a_modtree)
+        m.addAction(self.a_fieldtree)
         m.addAction(self.a_arch)
         m.addAction(self.a_uml)
 

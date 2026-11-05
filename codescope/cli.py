@@ -178,8 +178,8 @@ def cmd_info(a):
             print(f"  defined   : {db.location(e)}")
         for d in db.declarations(e.id):
             print(f"  declared  : {db.location(d)}")
-        if e.modifiers:
-            print(f"  modifiers : {e.modifiers}")
+        if M.shown_modifiers(e.modifiers):
+            print(f"  modifiers : {M.shown_modifiers(e.modifiers)}")
         if e.type:
             print(f"  type      : {e.type}")
         m = db.metrics(e.id)
@@ -364,6 +364,30 @@ def cmd_modtree(a):
         print(to_text(tree))
 
 
+def cmd_fieldtree(a):
+    from .core.calltree import build_field_tree, find_fields, to_svg, to_text
+    db = _open(a.db)
+    hits = find_fields(db, a.name)
+    if not hits:
+        sys.exit(f"error: no field named '{a.name}'")
+    if len(hits) > 1:
+        sys.exit(f"error: '{a.name}' matches {len(hits)} fields, use a longer name:\n  "
+                 + "\n  ".join(f.longname for f in hits))
+    field = hits[0]
+    tree = build_field_tree(db, field, depth=a.depth, paths=not a.flat, whole=not a.no_whole,
+                            creations=not a.no_creations)
+    if a.out and a.out.lower().endswith(".svg"):
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_svg(tree, f"Field tree: {field.longname}"))
+        print(f"Wrote {a.out} ({tree.creations} creations, {tree.writers} modifying functions)")
+    elif a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(to_text(tree))
+        print(f"Wrote {a.out} ({tree.creations} creations, {tree.writers} modifying functions)")
+    else:
+        print(to_text(tree))
+
+
 def cmd_gui(a):
     from .gui.app import main as gui_main
     return gui_main([a.db] if a.db else [])
@@ -499,6 +523,17 @@ def build_parser():
     s.add_argument("-d", "--depth", type=int, default=10)
     s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
     s.set_defaults(fn=cmd_modtree)
+
+    s = sub.add_parser("fieldtree", help="declaration, creation and modification of one field, in order")
+    s.add_argument("db")
+    s.add_argument("name", help="field, such as JointT.damping or JointT::damping")
+    s.add_argument("--flat", action="store_true", help="list the functions without call paths")
+    s.add_argument("--no-whole", action="store_true",
+                   help="ignore assignments that replace the whole object (obj.settings = other)")
+    s.add_argument("--no-creations", action="store_true", help="show only the declaration and the modifications")
+    s.add_argument("-d", "--depth", type=int, default=10)
+    s.add_argument("-o", "--out", help="output file: .svg for a picture, anything else for indented text")
+    s.set_defaults(fn=cmd_fieldtree)
 
     s = sub.add_parser("gui", help="open the graphical interface")
     s.add_argument("db", nargs="?")
